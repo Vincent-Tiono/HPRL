@@ -1,0 +1,17 @@
+numpy>=1.21
+tensorboardX>=2.5
+gym>=0.26.2
+requests
+wandb>=0.15
+ply
+imageio>=2.31
+tqdm
+h5py>=3.8
+pandas>=1.5
+colorlog
+progressbar2  # renamed package
+torch>=2.0
+graphviz
+pygifsicle
+scipy>=1.9
+opencv-python
