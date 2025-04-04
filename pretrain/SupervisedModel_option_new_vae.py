@@ -6,9 +6,13 @@ import torch
 import torch.nn as nn
 from torch import linalg as LA
 
+import wandb
+
 from pretrain.BaseModel import BaseModel
 from pretrain.models_option_new_vae import VAE, ConditionPolicy, ProgramVAE
 from rl.utils import masked_mean
+import torch.nn.functional as F
+
 
 # use GRU, GRU+Linear, Transformer
 # assuming new setting (token_space=35)
@@ -50,6 +54,34 @@ class SupervisedModel(BaseModel):
     def recurrent_hidden_state_size(self):
         """Size of rnn_hx."""
         return self.net.base.recurrent_hidden_state_size
+
+    def _get_contrastive_loss(self, z, b_z, margin=1.0):
+        """
+        Contrastive loss with 1:1 matching.
+        - z[i] should be close to b_z[i] (positive pair)
+        - z[i] should be at least `margin` away from b_z[j] where j ≠ i (negative pairs)
+
+        :param z:   Program embeddings, shape (B, 64)
+        :param b_z: Behavior embeddings, shape (B, 64)
+        :param margin: Margin for the negative pairs
+
+        :return: Scalar contrastive loss
+        """
+        B, D = z.shape
+        # Compute pairwise L2 distances between z and b_z => shape (B, B)
+        dist_matrix = torch.cdist(z, b_z, p=2)  # dist_matrix[i, j] = ||z[i] - b_z[j]||
+        # print(f"dist_matrix_shape: {dist_matrix.shape}")
+        # print(f"dist_matrix: {dist_matrix}")
+
+        # Positive loss: distance between z[i] and b_z[i]
+        pos_loss = torch.diagonal(dist_matrix).sum() / B
+
+        # Negative loss: hinge loss on margin - distance for all i ≠ j
+        mask = ~torch.eye(B, dtype=torch.bool, device=z.device)  # mask to exclude diagonal
+        neg_dists = dist_matrix[mask].view(B, B - 1)
+        neg_loss = F.relu(margin - neg_dists).sum() / (B * (B - 1))
+
+        return pos_loss + neg_loss
 
     def _get_condition_loss(self, a_h, a_h_len, action_logits, action_masks):
         """ loss between ground truth trajectories and predicted action sequences
@@ -155,7 +187,7 @@ class SupervisedModel(BaseModel):
         """ forward pass """
         output = self.net(programs, trg_mask, s_h, a_h, deterministic=True)
         pred_programs, pred_program_lens, output_logits, eop_pred_programs, eop_output_logits, pred_program_masks,\
-        action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time = output
+        action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = output
 
         # calculate latent program embedding norm
         assert len(pre_tanh_z.shape) == 2
@@ -187,9 +219,11 @@ class SupervisedModel(BaseModel):
         if not self._disable_condition:
             condition_loss, cond_t_accuracy, cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, action_logits,
                                                                                         action_masks)
+        contrastive_loss = self._get_contrastive_loss(z, b_z, margin=1.0)
 
         # total loss
-        loss = rec_loss + (self.latent_loss_coef * lat_loss) + (self.condition_loss_coef * condition_loss)
+        loss = rec_loss + contrastive_loss + (self.latent_loss_coef * lat_loss) + (self.condition_loss_coef * condition_loss)
+        # loss = contrastive_loss 
 
         if mode == 'train':
             loss.backward()
@@ -226,4 +260,12 @@ class SupervisedModel(BaseModel):
             'encoder_time': encoder_time,
             'decoder_time': decoder_time}
 
+        if mode == "train":  # Only log during training
+            wandb.log({
+                "loss": loss.detach().cpu().item(),
+                "rec_loss": rec_loss.detach().cpu().item(),
+                "lat_loss": lat_loss.detach().cpu().item(),
+                "condition_loss": condition_loss.detach().cpu().item(),
+                "contrastive_loss": contrastive_loss.detach().cpu().item(),
+            })
         return batch_info
