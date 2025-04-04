@@ -16,6 +16,8 @@ import errno
 import h5py
 from tqdm import tqdm
 
+import wandb
+
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -111,6 +113,7 @@ def get_exec_data(hdf5_file, program_id, num_agent_actions):
         s_h, s_h_len = x
         assert s_h_len > 1
         return np.expand_dims(s_h[0], 0)
+        # return s_h[:s_h_len]
 
     s_h = np.moveaxis(np.copy(hdf5_file[program_id]['s_h']), [-1,-2,-3], [-3,-1,-2])
     a_h = np.copy(hdf5_file[program_id]['a_h'])
@@ -368,6 +371,8 @@ def _temp(config, args):
 
 if __name__ == "__main__":
     
+    wandb.init(project="DRL-GS", name="one_program_data")
+
     #torch.set_num_threads(2)
     torch.set_num_threads(1)
 
