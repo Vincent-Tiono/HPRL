@@ -1,3 +1,5 @@
 **/*.DS_Store
 _site/
 .*.sw[pon]
+__pycache__/
+karel_dataset/
