@@ -117,8 +117,6 @@ class BehaviorEncoder(NNBase):
         
         self.state_projector = nn.Linear(hidden_size, unit_size)
 
-        # we have to project all the latents into one vector on the program latent space
-        self.latent_projector = nn.Linear(10, 1)
 
 
     def forward(self, s_0, a_h):
@@ -183,10 +181,7 @@ class BehaviorEncoder(NNBase):
         # 4) Reshape back to (B, R, out_dim)
         final_hidden = final_hidden.view(B, R, out_dim)
         #print(f"final_hidden size{final_hidden.size()}")
-        behavior_embedding = final_hidden.transpose(1,2)
-        behavior_embedding = self.latent_projector(behavior_embedding)
-        behavior_embedding = behavior_embedding.transpose(1,2)
-        behavior_embedding = behavior_embedding.squeeze()
+        behavior_embedding = final_hidden.mean(dim=1)
 
         return behavior_embedding
 
