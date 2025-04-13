@@ -38,6 +38,7 @@ class SupervisedModel(BaseModel):
         self._disable_decoder = self.config['net']['decoder']['freeze_params']
         self._disable_condition = self.config['net']['condition']['freeze_params']
         self.condition_states_source = self.config['net']['condition']['observations']
+        self.logit_scale = nn.Parameter(torch.tensor(2.6592))
 
         print("SupervisedModel: self.net.vae.decoder.setup: ", self.net.vae.decoder.setup)
         # debug code
@@ -55,33 +56,33 @@ class SupervisedModel(BaseModel):
         """Size of rnn_hx."""
         return self.net.base.recurrent_hidden_state_size
 
-    def _get_contrastive_loss(self, z, b_z, margin=1.0):
+    def _get_clip_loss(self, z, b_z):
         """
-        Contrastive loss with 1:1 matching.
-        - z[i] should be close to b_z[i] (positive pair)
-        - z[i] should be at least `margin` away from b_z[j] where j ≠ i (negative pairs)
-
-        :param z:   Program embeddings, shape (B, 64)
-        :param b_z: Behavior embeddings, shape (B, 64)
-        :param margin: Margin for the negative pairs
-
+        CLIP loss. Adapted from 
+        https://github.com/huggingface/transformers/blob/main/src/transformers/models/clip/modeling_clip.py
+        
+        :param z:   Program embeddings, shape (B, D)
+        :param b_z: Behavior embeddings, shape (B, D)
+        
         :return: Scalar contrastive loss
         """
-        B, D = z.shape
-        # Compute pairwise L2 distances between z and b_z => shape (B, B)
-        dist_matrix = torch.cdist(z, b_z, p=2)  # dist_matrix[i, j] = ||z[i] - b_z[j]||
-        # print(f"dist_matrix_shape: {dist_matrix.shape}")
-        # print(f"dist_matrix: {dist_matrix}")
-
-        # Positive loss: distance between z[i] and b_z[i]
-        pos_loss = torch.diagonal(dist_matrix).sum() / B
-
-        # Negative loss: hinge loss on margin - distance for all i ≠ j
-        mask = ~torch.eye(B, dtype=torch.bool, device=z.device)  # mask to exclude diagonal
-        neg_dists = dist_matrix[mask].view(B, B - 1)
-        neg_loss = F.relu(margin - neg_dists).sum() / (B * (B - 1))
-
-        return pos_loss + neg_loss
+        # Normalize embeddings
+        z = z / torch.norm(z, dim=-1, keepdim=True)
+        b_z = b_z / torch.norm(b_z, dim=-1, keepdim=True)
+        
+        # Compute similarity matrix (cosine similarity)
+        similarity = torch.matmul(z, b_z.T)
+        
+        # Temperature parameter (can be made configurable)
+        similarity = similarity * self.logit_scale.exp()
+        
+        # CLIP loss - both directions (z->b_z and b_z->z)
+        labels = torch.arange(len(similarity), device=similarity.device)
+        loss_z = F.cross_entropy(similarity, labels)
+        loss_b_z = F.cross_entropy(similarity.T, labels)
+        
+        # Average the losses (like in CLIP)
+        return (loss_z + loss_b_z) / 2.0
 
     def _get_condition_loss(self, a_h, a_h_len, action_logits, action_masks):
         """ loss between ground truth trajectories and predicted action sequences
@@ -219,10 +220,10 @@ class SupervisedModel(BaseModel):
         if not self._disable_condition:
             condition_loss, cond_t_accuracy, cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, action_logits,
                                                                                         action_masks)
-        contrastive_loss = self._get_contrastive_loss(z, b_z, margin=1.0)
+        clip_loss = self._get_clip_loss(z, b_z)
 
         # total loss
-        loss = rec_loss + contrastive_loss + (self.latent_loss_coef * lat_loss) + (self.condition_loss_coef * condition_loss)
+        loss = rec_loss + clip_loss + (self.latent_loss_coef * lat_loss) + (self.condition_loss_coef * condition_loss)
         # loss = contrastive_loss 
 
         if mode == 'train':
