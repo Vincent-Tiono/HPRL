@@ -46,7 +46,7 @@ class Karel_world(object):
         self.elapse_step = 0
         self.perception_count = 0
         self.progress_ratio = 0.0
-        self.s = s.astype(np.bool)
+        self.s = s.astype(np.bool_)
         self.s_h = [self.s.copy()]
         self.a_h = []
         self.h = self.s.shape[0]

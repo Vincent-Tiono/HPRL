@@ -121,6 +121,7 @@ config = {
     'loss': {
         'latent_loss_coef': 1.0,                    # coefficient of latent loss (beta) in VAE during SL training
         'condition_loss_coef': 1.0,                 # coefficient of condition policy loss during SL training
+        'behavior_condition_loss_coef': 1.0,        # coefficient of behavior condition loss during SL training
     },
     'dsl': {
         'use_simplified_dsl': False,                # reducing valid tokens from 50 to 31

@@ -1,0 +1,4 @@
+2025-04-13 22:42:09,983: __main__ GPU not available, running on CPU
+2025-04-13 22:42:09,995: __main__ Using device: cpu
+2025-04-13 22:42:09,996: __main__ Setting random seed
+2025-04-13 22:42:09,998: Using environment: karel

@@ -34,6 +34,7 @@ class SupervisedModel(BaseModel):
         self.max_demo_length = self.config['max_demo_length']
         self.latent_loss_coef = self.config['loss']['latent_loss_coef']
         self.condition_loss_coef = self.config['loss']['condition_loss_coef']
+        self.behavior_condition_loss_coef = self.config['loss']['behavior_condition_loss_coef']
         self._vanilla_ae = self.config['AE']
         self._disable_decoder = self.config['net']['decoder']['freeze_params']
         self._disable_condition = self.config['net']['condition']['freeze_params']
@@ -126,6 +127,56 @@ class SupervisedModel(BaseModel):
 
         return condition_loss, cond_t_accuracy, cond_p_accuracy
 
+    def _get_behavior_condition_loss(self, a_h, a_h_len, s_h, b_z):
+        """ Loss between ground truth trajectories and actions predicted using behavior embeddings
+        
+        Unlike _get_condition_loss which uses program embeddings, this function uses behavior
+        embeddings to predict actions, then computes loss against ground truth.
+        
+        :param a_h(int16): B x num_demo_per_program x max_demo_length - Ground truth action histories
+        :param a_h_len(int16): B x num_demo_per_program - Lengths of action histories
+        :param s_h(float): B x num_demo_per_program x max_demo_length x C x H x W - State observations
+        :param b_z(float): B x latent_dim - Behavior embeddings
+        :return: (behavior_condition_loss, b_cond_t_accuracy, b_cond_p_accuracy) - Loss and accuracy metrics
+        """
+        # Run condition policy using behavior embeddings
+        # Different from _get_condition_loss, it already runs the condition policy in ProgramVAE forward pass
+        _, _, _, b_action_logits, b_action_masks, _ = self.net.condition_policy(s_h, a_h, b_z, teacher_enforcing=False, deterministic=True)
+        
+        # Calculate condition loss using the predictions from behavior embeddings
+        batch_size_x_num_demo_per_program, max_a_h_len, num_actions = b_action_logits.shape
+        assert max_a_h_len == a_h.shape[-1]
+
+        padded_preds = b_action_logits
+
+        """ Create targets by masking invalid actions """
+        target_masks = a_h != self.net.condition_policy.num_agent_actions - 1
+        # Remove temporarily added no-op actions in case of empty trajectory to
+        # verify target masks
+        a_h_len2 = a_h_len - (a_h[:,:,0] == self.net.condition_policy.num_agent_actions - 1).to(a_h_len.dtype)
+        assert (target_masks.sum(dim=-1).squeeze() == a_h_len2.squeeze()).all()
+        targets = torch.where(target_masks, a_h, (num_actions-1) * torch.ones_like(a_h))
+
+        """ Create combined mask for loss calculation """
+        # Flatten everything and select actions for backpropagation
+        target_masks = target_masks.view(-1, 1)
+        action_masks = b_action_masks.view(-1, 1)
+        cond_mask = torch.max(action_masks, target_masks)
+
+        # Gather predictions that need backpropagation
+        subsampled_targets = targets.view(-1,1)[cond_mask].long()
+        subsampled_padded_preds = padded_preds.view(-1, num_actions)[cond_mask.squeeze()]
+
+        behavior_condition_loss = self.loss_fn(subsampled_padded_preds, subsampled_targets)
+
+        """ Calculate accuracy metrics """
+        with torch.no_grad():
+            batch_shape = padded_preds.shape[:-1]
+            b_cond_t_accuracy, b_cond_p_accuracy = calculate_accuracy(padded_preds.view(-1, num_actions),
+                                                                    targets.view(-1, 1), cond_mask, batch_shape)
+
+        return behavior_condition_loss, b_cond_t_accuracy, b_cond_p_accuracy
+
     def _greedy_rollout(self, batch, z, targets, trg_mask, mode):
         programs, _, _, s_h, a_h, a_h_len = batch
 
@@ -211,8 +262,10 @@ class SupervisedModel(BaseModel):
             self.optimizer.zero_grad()
 
         zero_tensor = torch.tensor([0.0], device=self.device, requires_grad=False)
-        lat_loss, rec_loss, condition_loss = zero_tensor, zero_tensor, zero_tensor
+        lat_loss, rec_loss, condition_loss, behavior_condition_loss = zero_tensor, zero_tensor, zero_tensor, zero_tensor
         cond_t_accuracy, cond_p_accuracy = zero_tensor, zero_tensor
+        b_cond_t_accuracy, b_cond_p_accuracy = zero_tensor, zero_tensor
+        
         if not self._disable_decoder:
             rec_loss = self.loss_fn(logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
         if not self._vanilla_ae:
@@ -221,11 +274,17 @@ class SupervisedModel(BaseModel):
         if not self._disable_condition:
             condition_loss, cond_t_accuracy, cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, action_logits,
                                                                                         action_masks)
+            # Add behavior condition loss calculation
+            behavior_condition_loss, b_cond_t_accuracy, b_cond_p_accuracy = self._get_behavior_condition_loss(a_h, a_h_len, s_h, b_z)
+            
         clip_loss = self._get_clip_loss(z, b_z)
 
-        # total loss
-        loss = rec_loss + clip_loss + (self.latent_loss_coef * lat_loss) + (self.condition_loss_coef * condition_loss)
-        # loss = contrastive_loss 
+        # total loss, adding behavior condition loss component
+        loss = (rec_loss + 
+                clip_loss + 
+                (self.latent_loss_coef * lat_loss) + 
+                (self.condition_loss_coef * condition_loss) + 
+                (self.behavior_condition_loss_coef * behavior_condition_loss))
 
         if mode == 'train':
             loss.backward()
@@ -243,6 +302,8 @@ class SupervisedModel(BaseModel):
             'decoder_program_accuracy': p_accuracy.detach().cpu().numpy().item(),
             'condition_action_accuracy': cond_t_accuracy.detach().cpu().numpy().item(),
             'condition_demo_accuracy': cond_p_accuracy.detach().cpu().numpy().item(),
+            'behavior_condition_action_accuracy': b_cond_t_accuracy.detach().cpu().numpy().item(),
+            'behavior_condition_demo_accuracy': b_cond_p_accuracy.detach().cpu().numpy().item(), 
             'decoder_greedy_token_accuracy': greedy_t_accuracy.detach().cpu().numpy().item(),
             'decoder_greedy_program_accuracy': greedy_p_accuracy.detach().cpu().numpy().item(),
             'condition_greedy_action_accuracy': greedy_a_accuracy.detach().cpu().numpy().item(),
@@ -254,6 +315,7 @@ class SupervisedModel(BaseModel):
             'rec_loss': rec_loss.detach().cpu().numpy().item(),
             'lat_loss': lat_loss.detach().cpu().numpy().item(),
             'condition_loss': condition_loss.detach().cpu().numpy().item(),
+            'behavior_condition_loss': behavior_condition_loss.detach().cpu().numpy().item(),
             'gt_programs': programs.detach().cpu().numpy(),
             'pred_programs': pred_programs.detach().cpu().numpy(),
             'generated_programs': generated_programs,
@@ -268,6 +330,7 @@ class SupervisedModel(BaseModel):
                 "rec_loss": rec_loss.detach().cpu().item(),
                 "lat_loss": lat_loss.detach().cpu().item(),
                 "condition_loss": condition_loss.detach().cpu().item(),
+                "behavior_condition_loss": behavior_condition_loss.detach().cpu().item(),
                 "contrastive_loss": clip_loss.detach().cpu().item(),
             })
         return batch_info

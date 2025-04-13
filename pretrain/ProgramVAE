@@ -1,0 +1,68 @@
+    def forward(self, programs, program_masks, init_states, a_h, rnn_hxs=None, masks=None, action=None, output_mask_all=None, eop_action=None,
+                agent_actions=None, agent_action_masks=None, deterministic=False, evaluate=False):
+        #print(f"a_h.shape: {a_h.shape}")
+        #print(f"s_h.shape: {init_states.shape}")
+        if self.vae.decoder.setup == 'supervised':
+            output, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z, z_mean, z_sigma, b_z_mean, b_z_sigma = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = init_states)
+            _, pred_programs, pred_programs_len, _, output_logits, eop_pred_programs, eop_output_logits, pred_program_masks, _ = output
+            _, _, _, action_logits, action_masks, _ = self.condition_policy(init_states, a_h, z, self.teacher_enforcing,
+                                                                         deterministic=deterministic)
+            return pred_programs, pred_programs_len, output_logits, eop_pred_programs, eop_output_logits, \
+                   pred_program_masks, action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z, z_mean, z_sigma, b_z_mean, b_z_sigma
+
+        # output, z = self.vae(programs, program_masks, self.teacher_enforcing)
+        """ VAE forward pass """
+        program_lens = program_masks.squeeze().sum(dim=-1)
+        t = time.time()
+        if self.vae._use_transformer_encoder:
+            program_masks = program_masks.squeeze().unsqueeze(-2)
+            _, h_enc = self.vae.program_encoder(programs, program_masks)
+        else:
+            _, h_enc = self.vae.program_encoder(programs, program_lens)
+        encoder_time = time.time() - t
+        z = h_enc.squeeze() if self.vae._vanilla_ae else self.vae._sample_latent(h_enc.squeeze())
+        #print(f"z.shape: {z.shape}")
+        pre_tanh_value = None
+        if self._tanh_after_sample or not self.use_decoder_dist:
+            pre_tanh_value = z
+            z = self.vae.tanh(z)
+
+        """ decoder forward pass """
+        t = time.time()
+        output = self.vae.decoder(programs, z, teacher_enforcing=evaluate, action=action,
+                                  output_mask_all=output_mask_all, eop_action=eop_action, deterministic=deterministic,
+                                  evaluate=evaluate)
+        decoder_time = time.time() - t
+
+        value, pred_programs, pred_programs_len, pred_programs_log_probs, output_logits, eop_pred_programs,\
+        eop_output_logits, pred_program_masks, dist_entropy = output
+
+        """ Condition policy rollout using sampled latent vector """
+        if self.condition_policy.setup == 'RL' and self.use_condition_policy_in_rl:
+            agent_value, agent_actions, agent_action_log_probs, agent_action_logits, agent_action_masks, \
+            agent_action_dist_entropy = self.condition_policy(init_states, None, z,
+                                                                          teacher_enforcing=evaluate,
+                                                                          eval_actions=agent_actions,
+                                                                          eval_masks_all=agent_action_masks,
+                                                                          deterministic=deterministic,
+                                                                          evaluate=evaluate)
+        else:
+            batch_size = z.shape[0]
+            agent_value = torch.zeros((batch_size, self.num_demo_per_program, 1), device=z.device, dtype=torch.long)
+            agent_actions = torch.zeros((batch_size, self.num_demo_per_program, self.max_demo_length - 1), device=z.device, dtype=torch.long)
+            agent_action_log_probs = torch.zeros((batch_size, self.num_demo_per_program, 1), device=z.device, dtype=torch.float)
+            agent_action_masks = torch.zeros((batch_size, self.num_demo_per_program, self.max_demo_length - 1), device=z.device, dtype=torch.bool)
+            agent_action_dist_entropy = torch.zeros(1, device=z.device, dtype=torch.float)
+
+
+        """ calculate latent log probs """
+        distribution_params = torch.stack((self.vae.z_mean, self.vae.z_sigma), dim=1)
+        if not self.use_decoder_dist:
+            latent_log_probs = self.vae.dist.log_probs(z, pre_tanh_value)
+            latent_dist_entropy = self.vae.dist.normal.entropy().mean()
+        else:
+            latent_log_probs, latent_dist_entropy = pred_programs_log_probs, dist_entropy
+
+        return value, pred_programs, pred_programs_log_probs, z, pred_program_masks, eop_pred_programs,\
+                agent_value, agent_actions, agent_action_log_probs, agent_action_masks, z, distribution_params, dist_entropy,\
+                agent_action_dist_entropy, latent_log_probs, latent_dist_entropy 
