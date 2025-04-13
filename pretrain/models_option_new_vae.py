@@ -83,7 +83,7 @@ class BehaviorEncoder(NNBase):
         super(BehaviorEncoder, self).__init__(
             recurrent=True,
             recurrent_input_size=unit_size,   # dimension fed into the RNN
-            hidden_size=unit_size,  # RNN’s hidden dimension
+            hidden_size=unit_size,  # RNN's hidden dimension
             dropout=dropout,
             rnn_type=rnn_type
         )
@@ -116,6 +116,10 @@ class BehaviorEncoder(NNBase):
             init_(nn.Linear(32 * 4 * 4, hidden_size)), nn.ReLU())
         
         self.state_projector = nn.Linear(hidden_size, unit_size)
+        
+        # Add mean and sigma projections for behavior encoder
+        self._enc_mu = nn.Linear(hidden_size, hidden_size)
+        self._enc_log_sigma = nn.Linear(hidden_size, hidden_size)
 
 
 
@@ -182,6 +186,15 @@ class BehaviorEncoder(NNBase):
         final_hidden = final_hidden.view(B, R, out_dim)
         #print(f"final_hidden size{final_hidden.size()}")
         behavior_embedding = final_hidden.mean(dim=1)
+        
+        # Calculate mean and sigma for behavior embedding
+        mu = self._enc_mu(behavior_embedding)
+        log_sigma = self._enc_log_sigma(behavior_embedding)
+        sigma = torch.exp(log_sigma)
+        
+        # Store these values for later use
+        self.b_z_mean = mu
+        self.b_z_sigma = sigma
 
         return behavior_embedding
 
@@ -642,6 +655,24 @@ class VAE(torch.nn.Module):
         mean_sq = z_mean * z_mean
         stddev_sq = z_stddev * z_stddev
         return 0.5 * torch.mean(mean_sq + stddev_sq - torch.log(stddev_sq) - 1)
+        
+    @staticmethod
+    def combined_latent_loss(z_mean, z_stddev, b_z_mean, b_z_stddev):
+        """
+        Combined latent loss that includes both program encoder and behavior encoder KL divergences
+        """
+        # Program encoder KL divergence
+        prog_mean_sq = z_mean * z_mean
+        prog_stddev_sq = z_stddev * z_stddev
+        prog_kl = 0.5 * torch.mean(prog_mean_sq + prog_stddev_sq - torch.log(prog_stddev_sq) - 1)
+        
+        # Behavior encoder KL divergence
+        beh_mean_sq = b_z_mean * b_z_mean
+        beh_stddev_sq = b_z_stddev * b_z_stddev
+        beh_kl = 0.5 * torch.mean(beh_mean_sq + beh_stddev_sq - torch.log(beh_stddev_sq) - 1)
+        
+        # Return the combined loss
+        return prog_kl + beh_kl
 
     def forward(self, programs, program_masks, teacher_enforcing, deterministic=True, a_h=None, s_h=None):
         program_lens = program_masks.squeeze().sum(dim=-1)
@@ -680,7 +711,7 @@ class VAE(torch.nn.Module):
             pre_tanh_b_z = self.behavior_encoder(s_h, a_h) #pretanh behavior embedding
             b_z = self.tanh(pre_tanh_b_z)
             #print(f"z.shape: {z.shape}, b_z.shape: {b_z.shape}")
-            return outputs, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z
+            return outputs, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z, self.z_mean, self.z_sigma, self.behavior_encoder.b_z_mean, self.behavior_encoder.b_z_sigma
 
 
         else:
@@ -969,12 +1000,12 @@ class ProgramVAE(nn.Module):
         #print(f"a_h.shape: {a_h.shape}")
         #print(f"s_h.shape: {init_states.shape}")
         if self.vae.decoder.setup == 'supervised':
-            output, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = init_states)
+            output, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z, z_mean, z_sigma, b_z_mean, b_z_sigma = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = init_states)
             _, pred_programs, pred_programs_len, _, output_logits, eop_pred_programs, eop_output_logits, pred_program_masks, _ = output
             _, _, _, action_logits, action_masks, _ = self.condition_policy(init_states, a_h, z, self.teacher_enforcing,
                                                                          deterministic=deterministic)
             return pred_programs, pred_programs_len, output_logits, eop_pred_programs, eop_output_logits, \
-                   pred_program_masks, action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z
+                   pred_program_masks, action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z, z_mean, z_sigma, b_z_mean, b_z_sigma
 
         # output, z = self.vae(programs, program_masks, self.teacher_enforcing)
         """ VAE forward pass """
