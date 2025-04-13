@@ -651,28 +651,36 @@ class VAE(torch.nn.Module):
         return mu + sigma * Variable(std_z, requires_grad=False)  # Reparameterization trick
 
     @staticmethod
-    def latent_loss(z_mean, z_stddev):
-        mean_sq = z_mean * z_mean
-        stddev_sq = z_stddev * z_stddev
-        return 0.5 * torch.mean(mean_sq + stddev_sq - torch.log(stddev_sq) - 1)
-        
-    @staticmethod
-    def combined_latent_loss(z_mean, z_stddev, b_z_mean, b_z_stddev):
+    def combined_latent_loss(z, b_z):
         """
-        Combined latent loss that includes both program encoder and behavior encoder KL divergences
+        Combined latent loss that pools the actual z and b_z vectors,
+        then calculates KL divergence from the pooled vectors
         """
-        # Program encoder KL divergence
-        prog_mean_sq = z_mean * z_mean
-        prog_stddev_sq = z_stddev * z_stddev
-        prog_kl = 0.5 * torch.mean(prog_mean_sq + prog_stddev_sq - torch.log(prog_stddev_sq) - 1)
+        # Check that dimensions match
+        assert z is not None and b_z is not None, "Actual latent vectors (z and b_z) must be provided"
+        assert z.shape == b_z.shape, "Program and behavior vectors must have the same shape"
         
-        # Behavior encoder KL divergence
-        beh_mean_sq = b_z_mean * b_z_mean
-        beh_stddev_sq = b_z_stddev * b_z_stddev
-        beh_kl = 0.5 * torch.mean(beh_mean_sq + beh_stddev_sq - torch.log(beh_stddev_sq) - 1)
+        # Pool the vectors (concatenate along batch dimension)
+        pooled_vectors = torch.cat([z, b_z], dim=0)
         
-        # Return the combined loss
-        return prog_kl + beh_kl
+        # Calculate combined mean and variance from pooled vectors
+        combined_mean = torch.mean(pooled_vectors, dim=0, keepdim=True)
+        combined_var = torch.var(pooled_vectors, dim=0, keepdim=True)
+        combined_stddev = torch.sqrt(combined_var)
+        
+        # Expand to match batch size for calculating KL divergence
+        batch_size = z.shape[0]
+        combined_mean = combined_mean.repeat(batch_size, 1)
+        combined_stddev = combined_stddev.repeat(batch_size, 1)
+        
+        # Now compute KL divergence between combined distribution N(combined_mean, combined_stddev²) and N(0,1)
+        combined_mean_sq = combined_mean.pow(2)
+        combined_stddev_sq = combined_stddev.pow(2)
+        
+        # KL(N(μ,σ²) || N(0,1)) = 0.5 * (μ² + σ² - log(σ²) - 1)
+        kl_div = 0.5 * torch.mean(combined_mean_sq + combined_stddev_sq - torch.log(combined_stddev_sq) - 1)
+        
+        return kl_div
 
     def forward(self, programs, program_masks, teacher_enforcing, deterministic=True, a_h=None, s_h=None):
         program_lens = program_masks.squeeze().sum(dim=-1)
@@ -711,7 +719,7 @@ class VAE(torch.nn.Module):
             pre_tanh_b_z = self.behavior_encoder(s_h, a_h) #pretanh behavior embedding
             b_z = self.tanh(pre_tanh_b_z)
             #print(f"z.shape: {z.shape}, b_z.shape: {b_z.shape}")
-            return outputs, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z, self.z_mean, self.z_sigma, self.behavior_encoder.b_z_mean, self.behavior_encoder.b_z_sigma
+            return outputs, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z
 
 
         else:
@@ -1000,12 +1008,12 @@ class ProgramVAE(nn.Module):
         #print(f"a_h.shape: {a_h.shape}")
         #print(f"s_h.shape: {init_states.shape}")
         if self.vae.decoder.setup == 'supervised':
-            output, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z, z_mean, z_sigma, b_z_mean, b_z_sigma = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = init_states)
+            output, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = init_states)
             _, pred_programs, pred_programs_len, _, output_logits, eop_pred_programs, eop_output_logits, pred_program_masks, _ = output
             _, _, _, action_logits, action_masks, _ = self.condition_policy(init_states, a_h, z, self.teacher_enforcing,
                                                                          deterministic=deterministic)
             return pred_programs, pred_programs_len, output_logits, eop_pred_programs, eop_output_logits, \
-                   pred_program_masks, action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z, z_mean, z_sigma, b_z_mean, b_z_sigma
+                   pred_program_masks, action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z
 
         # output, z = self.vae(programs, program_masks, self.teacher_enforcing)
         """ VAE forward pass """

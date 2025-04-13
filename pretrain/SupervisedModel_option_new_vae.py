@@ -188,7 +188,7 @@ class SupervisedModel(BaseModel):
         """ forward pass """
         output = self.net(programs, trg_mask, s_h, a_h, deterministic=True)
         pred_programs, pred_program_lens, output_logits, eop_pred_programs, eop_output_logits, pred_program_masks,\
-        action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z, z_mean, z_sigma, b_z_mean, b_z_sigma = output
+        action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = output
 
         # calculate latent program embedding norm
         assert len(pre_tanh_z.shape) == 2
@@ -217,7 +217,7 @@ class SupervisedModel(BaseModel):
             rec_loss = self.loss_fn(logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
         if not self._vanilla_ae:
             # Use combined latent loss from both program and behavior encoders
-            lat_loss = self.net.vae.combined_latent_loss(z_mean, z_sigma, b_z_mean, b_z_sigma)
+            lat_loss = self.net.vae.combined_latent_loss(z, b_z)
         if not self._disable_condition:
             condition_loss, cond_t_accuracy, cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, action_logits,
                                                                                         action_masks)
