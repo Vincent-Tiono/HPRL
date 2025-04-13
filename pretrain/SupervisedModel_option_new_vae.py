@@ -64,7 +64,7 @@ class SupervisedModel(BaseModel):
         :param z:   Program embeddings, shape (B, D)
         :param b_z: Behavior embeddings, shape (B, D)
         
-        :return: Scalar contrastive loss
+        :return: CLIP loss
         """
         # Normalize embeddings
         z = z / torch.norm(z, dim=-1, keepdim=True)
@@ -268,6 +268,6 @@ class SupervisedModel(BaseModel):
                 "rec_loss": rec_loss.detach().cpu().item(),
                 "lat_loss": lat_loss.detach().cpu().item(),
                 "condition_loss": condition_loss.detach().cpu().item(),
-                "contrastive_loss": clip_loss.detach().cpu().item(),
+                "clip_loss": clip_loss.detach().cpu().item(),
             })
         return batch_info
