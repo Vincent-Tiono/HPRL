@@ -47,6 +47,9 @@ config = {
             'dropout': 0.1,
             'method': 'Autobot',                    # 'Autobot' or 'MeanPooling'
         },
+        'behavior_encoder':{
+            'rollout_distill_method': 'mean',       # How to distill 10 rollout vectors into one vector
+        },
         'condition':{
             'freeze_params': False,
             'use_teacher_enforcing': True,
@@ -341,5 +344,7 @@ config = {
     'grammar':'handwritten',                        # grammar type: [None, 'handwritten']
     'use_trainable_tensor': False,                  # If True, use trainable tensor instead of meta-controller
     'cover_all_branches_in_demos': True,            # If True, make sure to cover all branches in randomly generated program in ExecEnv1
-    'final_reward_scale': False
+    'final_reward_scale': False,
+
+    'behavior_representation': 'action_sequence',    # 'states_sequence', 'action_sequence'
 }
