@@ -130,7 +130,6 @@ class ActionBehaviorEncoder(NNBase):
         """ get state_embedding of one image per demonstration"""
         # #print(f"BE s_0 size{s_0.size()}")
         s_0 = s_h[:, :, 0, :, :, :].unsqueeze(2)
-        print(f"BE s_0 size{s_0.size()}")
         batch_size, num_demos_per_program, demo_len, C, H, W = s_0.shape
         new_batch_size = s_0.shape[0] * s_0.shape[1]
         new_s0 = s_0.squeeze().view(new_batch_size, C, H, W)

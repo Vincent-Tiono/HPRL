@@ -124,6 +124,13 @@ config = {
     'loss': {
         'latent_loss_coef': 1.0,                    # coefficient of latent loss (beta) in VAE during SL training
         'condition_loss_coef': 1.0,                 # coefficient of condition policy loss during SL training
+        'enabled_losses': {
+            'rec': True,
+            'clip': False,
+            'contrastive': True,
+            'latent': True,
+            'condition': True,
+        },
     },
     'dsl': {
         'use_simplified_dsl': False,                # reducing valid tokens from 50 to 31
@@ -346,5 +353,5 @@ config = {
     'cover_all_branches_in_demos': True,            # If True, make sure to cover all branches in randomly generated program in ExecEnv1
     'final_reward_scale': False,
 
-    'behavior_representation': 'action_sequence',    # 'states_sequence', 'action_sequence'
+    'behavior_representation': 'state_sequence',    # 'state_sequence', 'action_sequence'
 }
