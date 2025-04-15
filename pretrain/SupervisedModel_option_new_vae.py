@@ -56,6 +56,34 @@ class SupervisedModel(BaseModel):
         """Size of rnn_hx."""
         return self.net.base.recurrent_hidden_state_size
 
+    def _get_contrastive_loss(self, z, b_z, margin=1.0):
+        """
+        Contrastive loss with 1:1 matching.
+        - z[i] should be close to b_z[i] (positive pair)
+        - z[i] should be at least `margin` away from b_z[j] where j ≠ i (negative pairs)
+
+        :param z:   Program embeddings, shape (B, 64)
+        :param b_z: Behavior embeddings, shape (B, 64)
+        :param margin: Margin for the negative pairs
+
+        :return: Scalar contrastive loss
+        """
+        B, D = z.shape
+        # Compute pairwise L2 distances between z and b_z => shape (B, B)
+        dist_matrix = torch.cdist(z, b_z, p=2)  # dist_matrix[i, j] = ||z[i] - b_z[j]||
+        # print(f"dist_matrix_shape: {dist_matrix.shape}")
+        # print(f"dist_matrix: {dist_matrix}")
+
+        # Positive loss: distance between z[i] and b_z[i]
+        pos_loss = torch.diagonal(dist_matrix).sum() / B
+
+        # Negative loss: hinge loss on margin - distance for all i ≠ j
+        mask = ~torch.eye(B, dtype=torch.bool, device=z.device)  # mask to exclude diagonal
+        neg_dists = dist_matrix[mask].view(B, B - 1)
+        neg_loss = F.relu(margin - neg_dists).sum() / (B * (B - 1))
+
+        return pos_loss + neg_loss
+
     def _get_clip_loss(self, z, b_z):
         """
         CLIP loss. Adapted from 
@@ -222,9 +250,23 @@ class SupervisedModel(BaseModel):
             condition_loss, cond_t_accuracy, cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, action_logits,
                                                                                         action_masks)
         clip_loss = self._get_clip_loss(z, b_z)
+        contrastive_loss = self._get_contrastive_loss(z, b_z)
 
         # total loss
-        loss = rec_loss + clip_loss + (self.latent_loss_coef * lat_loss) + (self.condition_loss_coef * condition_loss)
+        cfg_losses = self.config['loss']['enabled_losses']
+        loss = 0.0
+
+        if cfg_losses.get('rec', False):
+            loss += rec_loss
+        if cfg_losses.get('clip', False):
+            loss += clip_loss
+        if cfg_losses.get('contrastive', False):
+            loss += contrastive_loss
+        if cfg_losses.get('latent', False):
+            loss += self.config['loss']['latent_loss_coef'] * lat_loss
+        if cfg_losses.get('condition', False):
+            loss += self.config['loss']['condition_loss_coef'] * condition_loss
+
         # loss = contrastive_loss 
 
         if mode == 'train':
@@ -262,12 +304,12 @@ class SupervisedModel(BaseModel):
             'encoder_time': encoder_time,
             'decoder_time': decoder_time}
 
-        if mode == "train":  # Only log during training
-            wandb.log({
-                "loss": loss.detach().cpu().item(),
-                "rec_loss": rec_loss.detach().cpu().item(),
-                "lat_loss": lat_loss.detach().cpu().item(),
-                "condition_loss": condition_loss.detach().cpu().item(),
-                "clip_loss": clip_loss.detach().cpu().item(),
-            })
+        # if mode == "train":  # Only log during training
+        #     wandb.log({
+        #         "loss": loss.detach().cpu().item(),
+        #         "rec_loss": rec_loss.detach().cpu().item(),
+        #         "lat_loss": lat_loss.detach().cpu().item(),
+        #         "condition_loss": condition_loss.detach().cpu().item(),
+        #         "clip_loss": clip_loss.detach().cpu().item(),
+        #     })
         return batch_info
