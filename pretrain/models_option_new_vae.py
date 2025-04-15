@@ -57,7 +57,7 @@ from rl.utils import init
 
 
 
-class BehaviorEncoder(NNBase):
+class ActionBehaviorEncoder(NNBase):
     def __init__(
         self,
         recurrent,
@@ -80,7 +80,7 @@ class BehaviorEncoder(NNBase):
         :param unit_size: internal dimension for the RNN and/or embedding.
         """
         # We set recurrent=True so NNBase will handle RNN init for us
-        super(BehaviorEncoder, self).__init__(
+        super(ActionBehaviorEncoder, self).__init__(
             recurrent=True,
             recurrent_input_size=unit_size,   # dimension fed into the RNN
             hidden_size=unit_size,  # RNN’s hidden dimension
@@ -119,7 +119,7 @@ class BehaviorEncoder(NNBase):
 
 
 
-    def forward(self, s_0, a_h):
+    def forward(self, s_h, a_h):
         """
         :param 
             s0: shape (B, R, 1, C, H, W), initial state of the environment.
@@ -129,6 +129,8 @@ class BehaviorEncoder(NNBase):
 
         """ get state_embedding of one image per demonstration"""
         # #print(f"BE s_0 size{s_0.size()}")
+        s_0 = s_h[:, :, 0, :, :, :].unsqueeze(2)
+        print(f"BE s_0 size{s_0.size()}")
         batch_size, num_demos_per_program, demo_len, C, H, W = s_0.shape
         new_batch_size = s_0.shape[0] * s_0.shape[1]
         new_s0 = s_0.squeeze().view(new_batch_size, C, H, W)
@@ -185,7 +187,113 @@ class BehaviorEncoder(NNBase):
 
         return behavior_embedding
 
+class StateBehaviorEncoder(NNBase):
+    def __init__(
+        self,
+        recurrent,
+        num_actions,
+        hidden_size=64,
+        rnn_type='GRU',
+        dropout=0.0,
+        use_linear=False,
+        unit_size=256,
+        **kwargs
+    ):
+        """
+        Encodes a rollout of actions (only) into a single latent vector per rollout.
 
+        :param num_actions: how many possible actions exist (for embedding).
+        :param hidden_size: final output dimension (matching ProgramEncoder).
+        :param rnn_type: 'GRU' or 'LSTM'.
+        :param dropout: dropout on the RNN.
+        :param use_linear: if True, project from `unit_size` down to `hidden_size`.
+        :param unit_size: internal dimension for the RNN and/or embedding.
+        """
+        # We set recurrent=True so NNBase will handle RNN init for us
+        super(StateBehaviorEncoder, self).__init__(
+            recurrent=True,
+            recurrent_input_size=unit_size,   # dimension fed into the RNN
+            hidden_size=unit_size,  # RNN’s hidden dimension
+            dropout=dropout,
+            rnn_type=rnn_type
+        )
+
+        # Same style init as ConditionPolicy, etc.
+        init_ = lambda m: init(
+            m,
+            nn.init.orthogonal_,
+            lambda x: nn.init.constant_(x, 0),
+            nn.init.calculate_gain('relu')
+        )
+
+        self.num_actions = num_actions
+        self.hidden_size = hidden_size
+        self.rnn_type = rnn_type
+        self._use_linear = use_linear
+        self.unit_size = unit_size
+        self.state_shape = (kwargs['input_channel'], kwargs['input_height'], kwargs['input_width'])
+        # 1) Action embedding: each action ID → (unit_size)
+        self.action_encoder = nn.Embedding(num_actions, unit_size)
+
+        # 2) Optional projection from `unit_size` → `hidden_size`
+        if use_linear:
+            self.proj = nn.Linear(unit_size, hidden_size)
+
+        # 3) State Embedding
+        self.state_encoder = nn.Sequential(
+            init_(nn.Conv2d(self.state_shape[0], 32, 3, stride=1)), nn.ReLU(),
+            init_(nn.Conv2d(32, 32, 3, stride=1)), nn.ReLU(), Flatten(),
+            init_(nn.Linear(32 * 4 * 4, hidden_size)), nn.ReLU())
+        
+        self.state_projector = nn.Linear(hidden_size, unit_size)
+
+    def forward(self, s_h, a_h):
+        """
+        Encode a sequence of states using an RNN.
+        
+        :param s_h: shape (B, R, T, C, H, W) — B = programs, R = rollouts, T = time
+        :param a_h: not used, just pass for compatibility
+        :return: shape (B, out_dim), aggregated behavior embedding
+        """
+        B, R, T, C, H, W = s_h.shape
+        BR = B * R
+
+        # Flatten to [BR*T, C, H, W] to pass through ConvNet
+        s_h = s_h.view(BR * T, C, H, W)  # [BR*T, C, H, W]
+        state_embeddings = self.state_encoder(s_h)  # [BR*T, hidden_size]
+
+        # Project to RNN input dim: [BR*T, unit_size]
+        projected_state = self.state_projector(state_embeddings)
+
+        # Reshape to sequence form: [BR, T, unit_size]
+        projected_state_seq = projected_state.view(BR, T, self.unit_size)
+
+        # Transpose for RNN: [T, BR, unit_size]
+        embedded_s = projected_state_seq.transpose(0, 1)
+
+        # Run RNN
+        if self.rnn_type.upper() == 'GRU':
+            outputs, rnn_hxs = self.gru(embedded_s)  # rnn_hxs: [num_layers, BR, unit_size]
+        else:
+            outputs, (h_n, c_n) = self.lstm(embedded_s)
+            rnn_hxs = h_n
+
+        # Get last hidden state from top layer: [BR, unit_size]
+        final_hidden = rnn_hxs[-1]
+
+        # Optional projection: [BR, hidden_size]
+        if self._use_linear:
+            final_hidden = self.proj(final_hidden)
+            out_dim = self.hidden_size
+        else:
+            out_dim = self.unit_size
+
+        # Reshape back to [B, R, out_dim]
+        final_hidden = final_hidden.view(B, R, out_dim)
+
+        # Mean over R rollouts: [B, out_dim]
+        behavior_embedding = final_hidden.mean(dim=1)
+        return behavior_embedding
 
 
 
@@ -593,13 +701,20 @@ class VAE(torch.nn.Module):
 
         num_outputs = num_inputs
 
-
-        self.behavior_encoder = BehaviorEncoder(recurrent=kwargs['recurrent_policy'],
-                            num_actions=kwargs['dsl']['num_agent_actions'],
-                            hidden_size=kwargs['num_lstm_cell_units'], rnn_type=kwargs['net']['rnn_type'],
-                            dropout=kwargs['net']['dropout'], use_linear=kwargs['net']['use_linear'],
-                            unit_size=kwargs['net']['num_rnn_encoder_units'],
-                            **kwargs)
+        if kwargs['behavior_representation'] == 'state_sequence':
+            self.behavior_encoder = StateBehaviorEncoder(recurrent=kwargs['recurrent_policy'],
+                                num_actions=kwargs['dsl']['num_agent_actions'],
+                                hidden_size=kwargs['num_lstm_cell_units'], rnn_type=kwargs['net']['rnn_type'],
+                                dropout=kwargs['net']['dropout'], use_linear=kwargs['net']['use_linear'],
+                                unit_size=kwargs['net']['num_rnn_encoder_units'],
+                                **kwargs)
+        elif kwargs['behavior_representation'] == 'action_sequence':
+            self.behavior_encoder = ActionBehaviorEncoder(recurrent=kwargs['recurrent_policy'],
+                                num_actions=kwargs['dsl']['num_agent_actions'],
+                                hidden_size=kwargs['num_lstm_cell_units'], rnn_type=kwargs['net']['rnn_type'],
+                                dropout=kwargs['net']['dropout'], use_linear=kwargs['net']['use_linear'],
+                                unit_size=kwargs['net']['num_rnn_encoder_units'],
+                                **kwargs)
         if True:
             self.program_encoder = ProgramEncoder(num_inputs, num_outputs, recurrent=kwargs['recurrent_policy'],
                                 hidden_size=kwargs['num_lstm_cell_units'], rnn_type=kwargs['net']['rnn_type'],
@@ -964,12 +1079,14 @@ class ProgramVAE(nn.Module):
     def is_recurrent(self):
         return self.vae.program_encoder.is_recurrent
 
-    def forward(self, programs, program_masks, init_states, a_h, rnn_hxs=None, masks=None, action=None, output_mask_all=None, eop_action=None,
+    def forward(self, programs, program_masks, s_h, a_h, rnn_hxs=None, masks=None, action=None, output_mask_all=None, eop_action=None,
                 agent_actions=None, agent_action_masks=None, deterministic=False, evaluate=False):
         #print(f"a_h.shape: {a_h.shape}")
         #print(f"s_h.shape: {init_states.shape}")
+        init_states = s_h[:, :, 0, :, :, :].unsqueeze(2)
+        # print(f"init_states.shape: {init_states.shape}")
         if self.vae.decoder.setup == 'supervised':
-            output, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = init_states)
+            output, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = s_h)
             _, pred_programs, pred_programs_len, _, output_logits, eop_pred_programs, eop_output_logits, pred_program_masks, _ = output
             _, _, _, action_logits, action_masks, _ = self.condition_policy(init_states, a_h, z, self.teacher_enforcing,
                                                                          deterministic=deterministic)
@@ -1046,15 +1163,15 @@ class ProgramVAE(nn.Module):
                 else:
                     assert (act_program_info == debug_input[key][i]).all()
 
-    def act(self, programs, rnn_hxs, masks, init_states, deterministic=False):
+    def act(self, programs, rnn_hxs, masks, s_h, deterministic=False):
         program_masks = programs != self.num_program_tokens-1
-        outputs = self(programs.long(), program_masks, init_states, None, rnn_hxs, masks, deterministic=deterministic,
+        outputs = self(programs.long(), program_masks, s_h, None, rnn_hxs, masks, deterministic=deterministic,
                        evaluate=False)
         return outputs
 
-    def get_value(self, programs, rnn_hxs, masks, init_states, deterministic=False):
+    def get_value(self, programs, rnn_hxs, masks, s_h, deterministic=False):
         program_masks = programs != self.num_program_tokens-1
-        outputs = self(programs.long(), program_masks, init_states, None, rnn_hxs, masks, deterministic=deterministic,
+        outputs = self(programs.long(), program_masks, s_h, None, rnn_hxs, masks, deterministic=deterministic,
                        evaluate=False)
 
         value, pred_programs, pred_programs_log_probs, z, pred_program_masks, eop_pred_programs, \
@@ -1064,7 +1181,7 @@ class ProgramVAE(nn.Module):
 
     def evaluate_actions(self, inputs, rnn_hxs, masks, action, output_mask_all, eop_action, agent_actions,
                          agent_action_masks, program_ids, deterministic=False):
-        programs, init_states, z = inputs
+        programs, s_h, z = inputs
         program_masks = programs != self.num_program_tokens - 1
 
         if self._debug:
@@ -1074,7 +1191,7 @@ class ProgramVAE(nn.Module):
                                      'agent_action_masks': agent_action_masks,
                                      'ids': program_ids})
 
-        outputs = self(programs.long(), program_masks, init_states, None, rnn_hxs=rnn_hxs, masks=masks,
+        outputs = self(programs.long(), program_masks, s_h, None, rnn_hxs=rnn_hxs, masks=masks,
                        action=action.long(), output_mask_all=output_mask_all, eop_action=eop_action,
                        agent_actions=agent_actions, agent_action_masks=agent_action_masks,
                        deterministic=deterministic, evaluate=True)

@@ -127,7 +127,7 @@ class SupervisedModel(BaseModel):
         return condition_loss, cond_t_accuracy, cond_p_accuracy
 
     def _greedy_rollout(self, batch, z, targets, trg_mask, mode):
-        programs, _, _, s_h, a_h, a_h_len = batch
+        programs, _, _, s_h, s_h_len, a_h, a_h_len = batch
 
         if mode == 'train' and self.condition_states_source != 'initial_state':
             zero_tensor = torch.tensor([0.0], device=self.device, requires_grad=False)
@@ -146,7 +146,8 @@ class SupervisedModel(BaseModel):
                 batch_shape = greedy_output_logits.shape[:-1]
                 greedy_t_accuracy, greedy_p_accuracy = calculate_accuracy(logits, targets, vae_mask, batch_shape)
 
-            _, _, _, action_logits, action_masks, _ = self.net.condition_policy(s_h, a_h, z, teacher_enforcing=False, deterministic=True)
+            init_states = s_h[:, :, 0, :, :, :].unsqueeze(2)
+            _, _, _, action_logits, action_masks, _ = self.net.condition_policy(init_states, a_h, z, teacher_enforcing=False, deterministic=True)
             _, greedy_a_accuracy, greedy_d_accuracy = self._get_condition_loss(a_h, a_h_len, action_logits,
                                                                                action_masks)
 
@@ -183,7 +184,7 @@ class SupervisedModel(BaseModel):
             self.net.eval()
             torch.set_grad_enabled(False)
 
-        programs, ids, trg_mask, s_h, a_h, a_h_len = batch
+        programs, ids, trg_mask, s_h, s_h_len, a_h, a_h_len = batch
 
         """ forward pass """
         output = self.net(programs, trg_mask, s_h, a_h, deterministic=True)
@@ -267,6 +268,6 @@ class SupervisedModel(BaseModel):
                 "rec_loss": rec_loss.detach().cpu().item(),
                 "lat_loss": lat_loss.detach().cpu().item(),
                 "condition_loss": condition_loss.detach().cpu().item(),
-                "contrastive_loss": contrastive_loss.detach().cpu().item(),
+                "clip_loss": clip_loss.detach().cpu().item(),
             })
         return batch_info
