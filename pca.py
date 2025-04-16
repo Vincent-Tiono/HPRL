@@ -43,7 +43,7 @@ def load_encoders():
     behavior_encoder = BehaviorEncoder(
         recurrent=config['recurrent_policy'],
         num_actions=config['dsl']['num_agent_actions'],
-        hidden_size=config['num_lstm_cell_units'],
+        hidden_size=config['num_lstm_cell_units'], 
         rnn_type=config['net']['rnn_type'],
         dropout=config['net']['dropout'],
         use_linear=config['net']['use_linear'],
