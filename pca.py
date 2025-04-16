@@ -1,16 +1,12 @@
 """
-PCA Analysis Tool for Program Behavior and Source Code Encodings
+PCA Analysis Tool for Program Encoder and Behavior Encoder:
 
-This module provides functionality to:
-1. Load and manage pre-trained encoders
-2. Process program execution data from HDF5 files
-3. Process program source code from text files
-4. Encode program behaviors and source code
+1. Load pre-trained encoders
+2. Process behaviors from HDF5 files
+3. Process programs from txt files
+4. Encode behaviors and programs
 5. Perform PCA analysis and visualization
 6. Compare and analyze the encodings
-
-Author: Vincent Chang
-Date: 2024
 """
 
 import torch
@@ -28,8 +24,6 @@ import torch.nn.functional as F
 from typing import Tuple, List, Dict, Any, Optional
 from dataclasses import dataclass
 
-
-@dataclass
 class EncoderConfig:
     """Configuration for encoder models."""
     recurrent_policy: bool = True
@@ -317,39 +311,23 @@ class Analyzer:
     """Performs analysis and visualization of encoded data."""
     
     @staticmethod
-    def analyze_encodings(behavior_vectors: np.ndarray, program_vectors: np.ndarray,
-                         behavior_ids: List[str], program_ids: List[str]) -> Dict[str, Any]:
+    def analyze_encodings(behavior_vectors: np.ndarray, program_vectors: np.ndarray) -> Dict[str, Any]:
         """Analyze and compare encodings.
         
         Args:
             behavior_vectors: Behavior encoding vectors
             program_vectors: Program encoding vectors
-            behavior_ids: List of behavior program IDs
-            program_ids: List of program IDs
             
         Returns:
             Dictionary containing analysis results
         """
-        behavior_ids_set = set(behavior_ids)
-        program_ids_set = set(program_ids)
-        
-        common_ids = behavior_ids_set.intersection(program_ids_set)
-        behavior_only_ids = behavior_ids_set - program_ids_set
-        program_only_ids = program_ids_set - behavior_ids_set
-        
         # Calculate vector differences
-        behavior_dict = {pid: vec for pid, vec in zip(behavior_ids, behavior_vectors)}
-        program_dict = {pid: vec for pid, vec in zip(program_ids, program_vectors)}
-        
-        differences = [
-            np.linalg.norm(behavior_dict[pid] - program_dict[pid])
-            for pid in common_ids
-        ]
+        differences = []
+        for b_vec, p_vec in zip(behavior_vectors, program_vectors):
+            diff = np.linalg.norm(b_vec - p_vec)  # Euclidean distance
+            differences.append(diff)
         
         return {
-            'common_ids': list(common_ids),
-            'behavior_only_ids': list(behavior_only_ids),
-            'program_only_ids': list(program_only_ids),
             'differences': np.array(differences)
         }
     
@@ -443,20 +421,18 @@ def main():
         programs = data_processor.process_hdf5_file(hdf5_file_path, behavior_encoder)
         
         # Encode behaviors
-        behavior_vectors, behavior_ids = Encoder.encode_demos(programs, behavior_encoder)
+        behavior_vectors, _ = Encoder.encode_demos(programs, behavior_encoder)
         
         # Process text file
         txt_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/id.txt"
         program_data = data_processor.load_programs_from_txt(txt_file_path)
         
         # Encode programs
-        program_vectors, program_ids = Encoder.encode_programs(program_data, program_encoder, dsl)
+        program_vectors, _ = Encoder.encode_programs(program_data, program_encoder, dsl)
         
         # Analyze and visualize results
         if len(behavior_vectors) > 0 and len(program_vectors) > 0:
-            analysis_results = Analyzer.analyze_encodings(
-                behavior_vectors, program_vectors, behavior_ids, program_ids
-            )
+            analysis_results = Analyzer.analyze_encodings(behavior_vectors, program_vectors)
             Analyzer.visualize_results(behavior_vectors, program_vectors, analysis_results)
             
             # Print analysis summary
