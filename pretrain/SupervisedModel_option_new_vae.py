@@ -245,7 +245,8 @@ class SupervisedModel(BaseModel):
         if not self._disable_decoder:
             rec_loss = self.loss_fn(logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
         if not self._vanilla_ae:
-            lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.z_sigma)
+            # lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.z_sigma)
+            lat_loss = self.net.vae.combined_latent_loss(z, b_z)
         if not self._disable_condition:
             condition_loss, cond_t_accuracy, cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, action_logits,
                                                                                         action_masks)
