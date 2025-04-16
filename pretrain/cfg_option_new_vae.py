@@ -129,7 +129,8 @@ config = {
             'clip': False,
             'contrastive': True,
             'latent': True,
-            'condition': True,
+            'z_condition': True,
+            'b_z_condition': True,
         },
     },
     'dsl': {

@@ -1119,10 +1119,12 @@ class ProgramVAE(nn.Module):
         if self.vae.decoder.setup == 'supervised':
             output, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = s_h)
             _, pred_programs, pred_programs_len, _, output_logits, eop_pred_programs, eop_output_logits, pred_program_masks, _ = output
-            _, _, _, action_logits, action_masks, _ = self.condition_policy(init_states, a_h, z, self.teacher_enforcing,
+            _, _, _, z_action_logits, z_action_masks, _ = self.condition_policy(init_states, a_h, z, self.teacher_enforcing,
+                                                                         deterministic=deterministic)
+            _, _, _, b_z_action_logits, b_z_action_masks, _ = self.condition_policy(init_states, a_h, b_z, self.teacher_enforcing,
                                                                          deterministic=deterministic)
             return pred_programs, pred_programs_len, output_logits, eop_pred_programs, eop_output_logits, \
-                   pred_program_masks, action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z
+                   pred_program_masks, z_action_logits, z_action_masks, b_z_action_logits, b_z_action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z
 
         # output, z = self.vae(programs, program_masks, self.teacher_enforcing)
         """ VAE forward pass """
