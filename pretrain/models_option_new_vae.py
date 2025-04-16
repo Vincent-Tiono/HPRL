@@ -756,6 +756,38 @@ class VAE(torch.nn.Module):
         mean_sq = z_mean * z_mean
         stddev_sq = z_stddev * z_stddev
         return 0.5 * torch.mean(mean_sq + stddev_sq - torch.log(stddev_sq) - 1)
+        
+    @staticmethod
+    def combined_latent_loss(z, b_z):
+        """
+        Combined latent loss that pools the actual z and b_z vectors,
+        then calculates KL divergence from the pooled vectors
+        """
+        # Check that dimensions match
+        assert z is not None and b_z is not None, "Actual latent vectors (z and b_z) must be provided"
+        assert z.shape == b_z.shape, "Program and behavior vectors must have the same shape"
+
+        # Pool the vectors (concatenate along batch dimension)
+        pooled_vectors = torch.cat([z, b_z], dim=0)
+
+        # Calculate combined mean and variance from pooled vectors
+        combined_mean = torch.mean(pooled_vectors, dim=0, keepdim=True)
+        combined_var = torch.var(pooled_vectors, dim=0, keepdim=True)
+        combined_stddev = torch.sqrt(combined_var)
+
+        # Expand to match batch size for calculating KL divergence
+        batch_size = z.shape[0]
+        combined_mean = combined_mean.repeat(batch_size, 1)
+        combined_stddev = combined_stddev.repeat(batch_size, 1)
+
+        # Now compute KL divergence between combined distribution N(combined_mean, combined_stddev²) and N(0,1)
+        combined_mean_sq = combined_mean.pow(2)
+        combined_stddev_sq = combined_stddev.pow(2)
+
+        # KL(N(μ,σ²) || N(0,1)) = 0.5 * (μ² + σ² - log(σ²) - 1)
+        kl_div = 0.5 * torch.mean(combined_mean_sq + combined_stddev_sq - torch.log(combined_stddev_sq) - 1)
+
+        return kl_div
 
     def forward(self, programs, program_masks, teacher_enforcing, deterministic=True, a_h=None, s_h=None):
         program_lens = program_masks.squeeze().sum(dim=-1)
