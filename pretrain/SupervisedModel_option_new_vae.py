@@ -217,7 +217,7 @@ class SupervisedModel(BaseModel):
         """ forward pass """
         output = self.net(programs, trg_mask, s_h, a_h, deterministic=True)
         pred_programs, pred_program_lens, output_logits, eop_pred_programs, eop_output_logits, pred_program_masks,\
-        action_logits, action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = output
+        z_action_logits, z_action_masks, b_z_action_logits, b_z_action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = output
 
         # calculate latent program embedding norm
         assert len(pre_tanh_z.shape) == 2
@@ -240,16 +240,18 @@ class SupervisedModel(BaseModel):
             self.optimizer.zero_grad()
 
         zero_tensor = torch.tensor([0.0], device=self.device, requires_grad=False)
-        lat_loss, rec_loss, condition_loss = zero_tensor, zero_tensor, zero_tensor
+        lat_loss, rec_loss, z_condition_loss, b_z_condition_loss = zero_tensor, zero_tensor, zero_tensor, zero_tensor
         cond_t_accuracy, cond_p_accuracy = zero_tensor, zero_tensor
         if not self._disable_decoder:
             rec_loss = self.loss_fn(logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
         if not self._vanilla_ae:
-            # lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.z_sigma)
-            lat_loss = self.net.vae.combined_latent_loss(z, b_z)
+            lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.z_sigma)
         if not self._disable_condition:
-            condition_loss, cond_t_accuracy, cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, action_logits,
-                                                                                        action_masks)
+            z_condition_loss, z_cond_t_accuracy, z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, z_action_logits,
+                                                                                        z_action_masks)
+            b_z_condition_loss, b_z_cond_t_accuracy, b_z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len,
+                                                                                               b_z_action_logits,
+                                                                                               b_z_action_masks)
         clip_loss = self._get_clip_loss(z, b_z)
         contrastive_loss = self._get_contrastive_loss(z, b_z)
 
@@ -265,8 +267,11 @@ class SupervisedModel(BaseModel):
             loss += contrastive_loss
         if cfg_losses.get('latent', False):
             loss += self.config['loss']['latent_loss_coef'] * lat_loss
-        if cfg_losses.get('condition', False):
-            loss += self.config['loss']['condition_loss_coef'] * condition_loss
+        if cfg_losses.get('z_condition', False):
+            loss += self.config['loss']['condition_loss_coef'] * z_condition_loss
+        if cfg_losses.get('b_z_condition', False):
+            loss += self.config['loss']['condition_loss_coef'] * b_z_condition_loss
+            
 
         # loss = contrastive_loss 
 
@@ -296,7 +301,8 @@ class SupervisedModel(BaseModel):
             'total_loss': loss.detach().cpu().numpy().item(),
             'rec_loss': rec_loss.detach().cpu().numpy().item(),
             'lat_loss': lat_loss.detach().cpu().numpy().item(),
-            'condition_loss': condition_loss.detach().cpu().numpy().item(),
+            'z_condition_loss': z_condition_loss.detach().cpu().numpy().item(),
+            'b_z_condition_loss': b_z_condition_loss.detach().cpu().numpy().item(),
             'gt_programs': programs.detach().cpu().numpy(),
             'pred_programs': pred_programs.detach().cpu().numpy(),
             'generated_programs': generated_programs,
