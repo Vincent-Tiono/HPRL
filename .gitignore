@@ -5,5 +5,4 @@ __pycache__/
 karel_dataset/
 **/output_dir_new_vae_L40_1m_30epoch_20230104
 **/wandb
-/py3129
-/venv
+venv/
