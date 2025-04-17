@@ -25,6 +25,8 @@ def calculate_accuracy(logits, targets, mask, batch_shape):
 
     p_accuracy = 100 * (masked_preds.squeeze() == masked_targets.squeeze()).all(dim=1).float().mean()
     return t_accuracy, p_accuracy
+    # here t_accuracy is the total tokens accuracy (allowing errors in one program sequence)
+    # p_accuracy is the program accuracy (all tokens in one program sequence must be correct)
 
 
 class SupervisedModel(BaseModel):
@@ -108,9 +110,16 @@ class SupervisedModel(BaseModel):
         labels = torch.arange(len(similarity), device=similarity.device)
         loss_z = F.cross_entropy(similarity, labels)
         loss_b_z = F.cross_entropy(similarity.T, labels)
-        
-        # Average the losses (like in CLIP)
-        return (loss_z + loss_b_z) / 2.0
+        clip_loss = (loss_z + loss_b_z) / 2.0
+
+        # Top-1 accuracy (both directions)
+        pred_z = similarity.argmax(dim=1)       # z -> b_z
+        pred_b_z = similarity.T.argmax(dim=1)   # b_z -> z
+        acc_z = (pred_z == labels).float().mean()
+        acc_b_z = (pred_b_z == labels).float().mean()
+        clip_acc = (acc_z + acc_b_z) / 2.0
+
+        return clip_loss, clip_acc
 
     def _get_condition_loss(self, a_h, a_h_len, action_logits, action_masks):
         """ loss between ground truth trajectories and predicted action sequences
@@ -155,6 +164,7 @@ class SupervisedModel(BaseModel):
         return condition_loss, cond_t_accuracy, cond_p_accuracy
 
     def _greedy_rollout(self, batch, z, targets, trg_mask, mode):
+        # autoregressive action predictions of decoder and condition policy
         programs, _, _, s_h, s_h_len, a_h, a_h_len = batch
 
         if mode == 'train' and self.condition_states_source != 'initial_state':
@@ -215,9 +225,29 @@ class SupervisedModel(BaseModel):
         programs, ids, trg_mask, s_h, s_h_len, a_h, a_h_len = batch
 
         """ forward pass """
-        output = self.net(programs, trg_mask, s_h, a_h, deterministic=True)
-        pred_programs, pred_program_lens, output_logits, eop_pred_programs, eop_output_logits, pred_program_masks,\
-        z_action_logits, z_action_masks, b_z_action_logits, b_z_action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = output
+        z_output, b_z_output, encoder_time, decoder_time = self.net(programs, trg_mask, s_h, a_h, s_h_len, a_h_len, deterministic=True)
+        z_pred_programs       = z_output['pred_programs']
+        z_pred_programs_len   = z_output['pred_programs_len']
+        z_output_logits       = z_output['output_logits']
+        z_eop_pred_programs   = z_output['eop_pred_programs']
+        z_eop_output_logits   = z_output['eop_output_logits']
+        z_pred_program_masks  = z_output['pred_program_masks']
+        z_action_logits       = z_output['action_logits']
+        z_action_masks        = z_output['action_masks']
+        pre_tanh_z            = z_output['pre_tanh']
+        z                     = z_output['z']
+
+        b_z_pred_programs       = b_z_output['pred_programs']
+        b_z_pred_programs_len   = b_z_output['pred_programs_len']
+        b_z_output_logits       = b_z_output['output_logits']
+        b_z_eop_pred_programs   = b_z_output['eop_pred_programs']
+        b_z_eop_output_logits   = b_z_output['eop_output_logits']
+        b_z_pred_program_masks  = b_z_output['pred_program_masks']
+        b_z_action_logits       = b_z_output['action_logits']
+        b_z_action_masks        = b_z_output['action_masks']
+        pre_tanh_b_z            = b_z_output['pre_tanh']
+        b_z                     = b_z_output['z']
+
 
         # calculate latent program embedding norm
         assert len(pre_tanh_z.shape) == 2
@@ -230,8 +260,9 @@ class SupervisedModel(BaseModel):
         # skip first token DEF for loss calculation
         targets = programs[:, 1:].contiguous().view(-1, 1)
         trg_mask = trg_mask[:, 1:].contiguous().view(-1, 1)
-        logits = output_logits.view(-1, output_logits.shape[-1])
-        pred_mask = pred_program_masks.view(-1, 1)
+        z_logits = z_output_logits.view(-1, z_output_logits.shape[-1])
+        b_z_logits = b_z_output_logits.view(-1, b_z_output_logits.shape[-1])
+        pred_mask = z_pred_program_masks.view(-1, 1)
         # need to penalize shorter and longer predicted programs
         vae_mask = torch.max(pred_mask, trg_mask)
 
@@ -241,9 +272,10 @@ class SupervisedModel(BaseModel):
 
         zero_tensor = torch.tensor([0.0], device=self.device, requires_grad=False)
         lat_loss, rec_loss, z_condition_loss, b_z_condition_loss = zero_tensor, zero_tensor, zero_tensor, zero_tensor
-        cond_t_accuracy, cond_p_accuracy = zero_tensor, zero_tensor
+        z_cond_t_accuracy, z_cond_p_accuracy, b_z_cond_t_accuracy, b_z_cond_p_accuracy = zero_tensor, zero_tensor, zero_tensor, zero_tensor
         if not self._disable_decoder:
-            rec_loss = self.loss_fn(logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
+            z_rec_loss = self.loss_fn(z_logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
+            b_z_rec_loss = self.loss_fn(b_z_logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
         if not self._vanilla_ae:
             lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.z_sigma)
         if not self._disable_condition:
@@ -252,18 +284,20 @@ class SupervisedModel(BaseModel):
             b_z_condition_loss, b_z_cond_t_accuracy, b_z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len,
                                                                                                b_z_action_logits,
                                                                                                b_z_action_masks)
-        clip_loss = self._get_clip_loss(z, b_z)
+        clip_loss, clip_acc = self._get_clip_loss(z, b_z)
         contrastive_loss = self._get_contrastive_loss(z, b_z)
 
         # total loss
         cfg_losses = self.config['loss']['enabled_losses']
         loss = 0.0
 
-        if cfg_losses.get('rec', False):
-            loss += rec_loss
-        if cfg_losses.get('clip', False):
+        if cfg_losses.get('z_rec', False):
+            loss += z_rec_loss
+        if cfg_losses.get('b_z_rec', False):
+            loss += b_z_rec_loss
+        if cfg_losses.get('contrastive_loss', False) == 'clip':
             loss += clip_loss
-        if cfg_losses.get('contrastive', False):
+        if cfg_losses.get('contrastive_loss', False) == 'contrastive':
             loss += contrastive_loss
         if cfg_losses.get('latent', False):
             loss += self.config['loss']['latent_loss_coef'] * lat_loss
@@ -281,42 +315,99 @@ class SupervisedModel(BaseModel):
 
         """ calculate accuracy """
         with torch.no_grad():
-            batch_shape = output_logits.shape[:-1]
-            t_accuracy, p_accuracy = calculate_accuracy(logits, targets, vae_mask, batch_shape)
-            greedy_accuracies, generated_programs, glogits = self._greedy_rollout(batch, z, targets, trg_mask, mode)
-            greedy_t_accuracy, greedy_p_accuracy, greedy_a_accuracy, greedy_d_accuracy = greedy_accuracies
+            batch_shape = z_output_logits.shape[:-1]
+            z_t_accuracy, z_p_accuracy = calculate_accuracy(z_logits, targets, vae_mask, batch_shape)
+            b_z_t_accuracy, b_z_p_accuracy = calculate_accuracy(b_z_logits, targets, vae_mask, batch_shape)
+            z_greedy_accuracies, z_generated_programs, z_glogits = self._greedy_rollout(batch, z, targets, trg_mask, mode)
+            b_z_greedy_accuracies, b_z_generated_programs, b_z_logits = self._greedy_rollout(batch, b_z, targets, trg_mask, mode)
+            z_greedy_t_accuracy, z_greedy_p_accuracy, z_greedy_a_accuracy, z_greedy_d_accuracy = z_greedy_accuracies
+            b_z_greedy_t_accuracy, b_z_greedy_p_accuracy, b_z_greedy_a_accuracy, b_z_greedy_d_accuracy = b_z_greedy_accuracies
 
         batch_info = {
-            'decoder_token_accuracy': t_accuracy.detach().cpu().numpy().item(),
-            'decoder_program_accuracy': p_accuracy.detach().cpu().numpy().item(),
-            'condition_action_accuracy': cond_t_accuracy.detach().cpu().numpy().item(),
-            'condition_demo_accuracy': cond_p_accuracy.detach().cpu().numpy().item(),
-            'decoder_greedy_token_accuracy': greedy_t_accuracy.detach().cpu().numpy().item(),
-            'decoder_greedy_program_accuracy': greedy_p_accuracy.detach().cpu().numpy().item(),
-            'condition_greedy_action_accuracy': greedy_a_accuracy.detach().cpu().numpy().item(),
-            'condition_greedy_demo_accuracy': greedy_d_accuracy.detach().cpu().numpy().item(),
+            'z_decoder_token_accuracy': z_t_accuracy.detach().cpu().numpy().item(),
+            'z_decoder_program_accuracy': z_p_accuracy.detach().cpu().numpy().item(),
+            'z_condition_action_accuracy': z_cond_t_accuracy.detach().cpu().numpy().item(),
+            'z_condition_demo_accuracy': z_cond_p_accuracy.detach().cpu().numpy().item(),
+            'z_decoder_greedy_token_accuracy': z_greedy_t_accuracy.detach().cpu().numpy().item(),
+            'z_decoder_greedy_program_accuracy': z_greedy_p_accuracy.detach().cpu().numpy().item(),
+            'z_condition_greedy_action_accuracy': z_greedy_a_accuracy.detach().cpu().numpy().item(),
+            'z_condition_greedy_demo_accuracy': z_greedy_d_accuracy.detach().cpu().numpy().item(),
+            'b_z_decoder_token_accuracy': b_z_t_accuracy.detach().cpu().numpy().item(),
+            'b_z_decoder_program_accuracy': b_z_p_accuracy.detach().cpu().numpy().item(),
+            'b_z_condition_action_accuracy': b_z_cond_t_accuracy.detach().cpu().numpy().item(),
+            'b_z_condition_demo_accuracy': b_z_cond_p_accuracy.detach().cpu().numpy().item(),
+            'b_z_decoder_greedy_token_accuracy': b_z_greedy_t_accuracy.detach().cpu().numpy().item(),
+            'b_z_decoder_greedy_program_accuracy': b_z_greedy_p_accuracy.detach().cpu().numpy().item(),
+            'b_z_condition_greedy_action_accuracy': b_z_greedy_a_accuracy.detach().cpu().numpy().item(),
+            'b_z_condition_greedy_demo_accuracy': b_z_greedy_d_accuracy.detach().cpu().numpy().item(),
+            'clip_loss_accuracy': clip_acc.detach().cpu().numpy().item(),
             'pre_tanh_z_inf_norm_mean': batch_pre_tanh_z_inf_norm_mean.detach().cpu().numpy().item(),
             'pre_tanh_z_mean_mean': batch_pre_tanh_z_mean_mean.detach().cpu().numpy().item(),
             'pre_tanh_z_outlier_ratio': batch_pre_tanh_z_outlier_ratio.detach().cpu().numpy().item(),
             'total_loss': loss.detach().cpu().numpy().item(),
-            'rec_loss': rec_loss.detach().cpu().numpy().item(),
+            'z_rec_loss': z_rec_loss.detach().cpu().numpy().item(),
+            'b_z_rec_loss': b_z_rec_loss.detach().cpu().numpy().item(),
             'lat_loss': lat_loss.detach().cpu().numpy().item(),
             'z_condition_loss': z_condition_loss.detach().cpu().numpy().item(),
             'b_z_condition_loss': b_z_condition_loss.detach().cpu().numpy().item(),
+            'clip_loss': clip_loss.detach().cpu().numpy().item(),
+            'contrastive_loss': contrastive_loss.detach().cpu().numpy().item(),
             'gt_programs': programs.detach().cpu().numpy(),
-            'pred_programs': pred_programs.detach().cpu().numpy(),
-            'generated_programs': generated_programs,
+            'z_pred_programs': z_pred_programs.detach().cpu().numpy(),
+            'b_z_pred_programs': b_z_pred_programs.detach().cpu().numpy(),
+            'z_generated_programs': z_generated_programs,
+            'b_z_generated_programs': b_z_generated_programs,
             'program_ids': ids,
             'latent_vectors': z.detach().cpu().numpy().tolist(),
             'encoder_time': encoder_time,
             'decoder_time': decoder_time}
 
-        # if mode == "train":  # Only log during training
-        #     wandb.log({
-        #         "loss": loss.detach().cpu().item(),
-        #         "rec_loss": rec_loss.detach().cpu().item(),
-        #         "lat_loss": lat_loss.detach().cpu().item(),
-        #         "condition_loss": condition_loss.detach().cpu().item(),
-        #         "clip_loss": clip_loss.detach().cpu().item(),
-        #     })
+        if mode == "train":
+            wandb.log({
+                # Flat scalar losses
+                'loss/total': loss.detach().cpu().numpy().item(),
+                'loss/z_rec': z_rec_loss.detach().cpu().numpy().item(),
+                'loss/b_z_rec': b_z_rec_loss.detach().cpu().numpy().item(),
+                'loss/lat': lat_loss.detach().cpu().numpy().item(),
+                'loss/z_condition': z_condition_loss.detach().cpu().numpy().item(),
+                'loss/b_z_condition': b_z_condition_loss.detach().cpu().numpy().item(),
+                'loss/clip': clip_loss.detach().cpu().numpy().item(),
+                'loss/clip_accuracy': clip_acc.detach().cpu().numpy().item(),
+                'loss/contrastive': contrastive_loss.detach().cpu().numpy().item(),
+
+                # z vs b_z — will be plotted on same chart using nested dict
+                'z_vs_b/decoder_token_accuracy': {
+                    'z': z_t_accuracy.detach().cpu().numpy().item(),
+                    'b_z': b_z_t_accuracy.detach().cpu().numpy().item()
+                },
+                'z_vs_b/decoder_program_accuracy': {
+                    'z': z_p_accuracy.detach().cpu().numpy().item(),
+                    'b_z': b_z_p_accuracy.detach().cpu().numpy().item()
+                },
+                'z_vs_b/condition_action_accuracy': {
+                    'z': z_cond_t_accuracy.detach().cpu().numpy().item(),
+                    'b_z': b_z_cond_t_accuracy.detach().cpu().numpy().item()
+                },
+                'z_vs_b/condition_demo_accuracy': {
+                    'z': z_cond_p_accuracy.detach().cpu().numpy().item(),
+                    'b_z': b_z_cond_p_accuracy.detach().cpu().numpy().item()
+                },
+                'z_vs_b/decoder_greedy_token_accuracy': {
+                    'z': z_greedy_t_accuracy.detach().cpu().numpy().item(),
+                    'b_z': b_z_greedy_t_accuracy.detach().cpu().numpy().item()
+                },
+                'z_vs_b/decoder_greedy_program_accuracy': {
+                    'z': z_greedy_p_accuracy.detach().cpu().numpy().item(),
+                    'b_z': b_z_greedy_p_accuracy.detach().cpu().numpy().item()
+                },
+                'z_vs_b/condition_greedy_action_accuracy': {
+                    'z': z_greedy_a_accuracy.detach().cpu().numpy().item(),
+                    'b_z': b_z_greedy_a_accuracy.detach().cpu().numpy().item()
+                },
+                'z_vs_b/condition_greedy_demo_accuracy': {
+                    'z': z_greedy_d_accuracy.detach().cpu().numpy().item(),
+                    'b_z': b_z_greedy_d_accuracy.detach().cpu().numpy().item()
+                },
+            })
+
         return batch_info
