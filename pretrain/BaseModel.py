@@ -106,7 +106,7 @@ class BaseModel(object):
         num_batches = len(data_loader)
 
         batch_info_list = defaultdict(list)
-        batch_gt_programs, batch_pred_programs, batch_gen_programs = [], [], []
+        batch_gt_programs, batch_z_pred_programs, batch_b_z_pred_programs, batch_gen_programs = [], [], [], []
         batch_program_ids, batch_latent_programs = [], []
         for batch_idx, batch in enumerate(data_loader):
 
@@ -135,7 +135,8 @@ class BaseModel(object):
 
             # log programs
             batch_gt_programs.append(batch_info['gt_programs'])
-            batch_pred_programs.append(batch_info['pred_programs'])
+            batch_z_pred_programs.append(batch_info['z_pred_programs'])
+            batch_b_z_pred_programs.append(batch_info['b_z_pred_programs'])
             batch_program_ids.append(batch_info['program_ids'])
             batch_latent_programs.append(batch_info['latent_vectors'])
 
@@ -145,11 +146,11 @@ class BaseModel(object):
                 for i in range(min(batch_info['gt_programs'].shape[0], 5)):
                     self.writer.add_text('dataset/epoch_{}'.format(epoch),
                                          'gt: {} pred: {}'.format(self.dsl.intseq2str(batch_info['gt_programs'][i]),
-                                                                  self.dsl.intseq2str(batch_info['pred_programs'][i])),
+                                                                  self.dsl.intseq2str(batch_info['z_pred_programs'][i])),
                                          epoch * num_batches)
 
-                batch_gen_programs.append(batch_info['generated_programs'])
-                for i, program in enumerate(batch_info['generated_programs']):
+                batch_gen_programs.append(batch_info['z_generated_programs'])
+                for i, program in enumerate(batch_info['z_generated_programs']):
                     self.writer.add_text('generated/epoch_{}'.format(epoch), program, epoch * num_batches)
 
         epoch_info['generated_programs'] = batch_gen_programs
