@@ -121,18 +121,6 @@ config = {
     'eval': {
         'usage': 'test',                            # what dataset to use {train, valid, test}
     },
-    'loss': {
-        'latent_loss_coef': 1.0,                    # coefficient of latent loss (beta) in VAE during SL training
-        'condition_loss_coef': 1.0,                 # coefficient of condition policy loss during SL training
-        'enabled_losses': {
-            'rec': True,
-            'clip': False,
-            'contrastive': True,
-            'latent': True,
-            'z_condition': True,
-            'b_z_condition': True,
-        },
-    },
     'dsl': {
         'use_simplified_dsl': False,                # reducing valid tokens from 50 to 31
         'max_program_len': 12, #45,                 # maximum program length
@@ -354,5 +342,18 @@ config = {
     'cover_all_branches_in_demos': True,            # If True, make sure to cover all branches in randomly generated program in ExecEnv1
     'final_reward_scale': False,
 
-    'behavior_representation': 'state_sequence',    # 'state_sequence', 'action_sequence'
+    'behavior_representation': 'action_sequence',    # 'state_sequence', 'action_sequence'
+    'fuse_s_0': True,                               # 'True', fuse s_0 with a_h embedding after RNN. 'False': concatenate s_0 with a_h then RNN
+    'loss': {
+        'latent_loss_coef': 1.0,                    # coefficient of latent loss (beta) in VAE during SL training
+        'condition_loss_coef': 1.0,                 # coefficient of condition policy loss during SL training
+        'enabled_losses': {
+            'z_rec': True,
+            'b_z_rec': True,
+            'contrastive_loss': 'contrastive',      # 'contrastive', 'clip'
+            'latent': True,
+            'z_condition': True,
+            'b_z_condition': True,
+        },
+    },
 }

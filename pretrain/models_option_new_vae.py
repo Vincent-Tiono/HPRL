@@ -102,6 +102,7 @@ class ActionBehaviorEncoder(NNBase):
         self._use_linear = use_linear
         self.unit_size = unit_size
         self.state_shape = (kwargs['input_channel'], kwargs['input_height'], kwargs['input_width'])
+        self.fuse_s_0 = kwargs['fuse_s_0']
         # 1) Action embedding: each action ID → (unit_size)
         self.action_encoder = nn.Embedding(num_actions, unit_size)
 
@@ -119,72 +120,70 @@ class ActionBehaviorEncoder(NNBase):
 
 
 
-    def forward(self, s_h, a_h):
+    def forward(self, s_h, a_h, s_h_len, a_h_len):
         """
         :param 
-            s0: shape (B, R, 1, C, H, W), initial state of the environment.
+            s_h: shape (B, R, 1, C, H, W), initial state of the environment.
             a_h: shape (B, R, T), each entry is an action ID.
         :return: shape (B, R, out_dim), where out_dim = hidden_size or unit_size
         """
 
-        """ get state_embedding of one image per demonstration"""
-        # #print(f"BE s_0 size{s_0.size()}")
-        s_0 = s_h[:, :, 0, :, :, :].unsqueeze(2)
-        batch_size, num_demos_per_program, demo_len, C, H, W = s_0.shape
-        new_batch_size = s_0.shape[0] * s_0.shape[1]
-        new_s0 = s_0.squeeze().view(new_batch_size, C, H, W)
-        # #print(f"BE new_s0 size{new_s0.size()}")
-        state_embeddings = self.state_encoder(new_s0)
-        state_embeddings = state_embeddings.view(new_batch_size, -1)
-
-        projected_s_0 = self.state_projector(state_embeddings)
-        projected_s_0 = projected_s_0.unsqueeze(1)
-        
-
-        # #print(f"BE state_embeddings size{state_embeddings.size()}")
-
-        # #print(f"BE state_embeddings size{state_embeddings.size()}")
-
-        #print(f"BE a_h size{a_h.size()}")
-        B, R, T = a_h.shape
-        # Flatten (B, R) → B' = B*R
+        # Extract initial state image
+        s_0 = s_h[:, :, 0, :, :, :]  # (B, R, C, H, W)
+        B, R, C, H, W = s_0.shape
         B_rolled = B * R
 
-        # (B_rolled, T)
+        new_s0 = s_0.view(B_rolled, C, H, W)
+        state_embeddings = self.state_encoder(new_s0)  # [B*R, hidden_size]
+        state_embed = self.state_projector(state_embeddings)  # [B*R, unit_size]
+
+        # Action sequence processing
+        B, R, T = a_h.shape
         a_h_flat = a_h.view(B_rolled, T).long()
+        a_h_len_flat = a_h_len.view(B_rolled)
 
-        # 1) Action embedding => (B_rolled, T, unit_size)
-        embedded_actions = self.action_encoder(a_h_flat)
-        embedded_s_a = torch.cat((projected_s_0, embedded_actions), dim=1)
-        #print(f"embedded_s_a size{embedded_s_a.size()}")
-        embedded_s_a = embedded_s_a.transpose(0, 1)
-        #print(f"embedded_s_a size{embedded_s_a.size()}")
+        embedded_actions = self.action_encoder(a_h_flat)  # [B*R, T, unit_size]
 
-        # 2) RNN: either GRU or LSTM
-        if self.rnn_type.upper() == 'GRU':
-            outputs, rnn_hxs = self.gru(embedded_s_a)
+        if self.fuse_s_0:
+            embedded_s_a = embedded_actions  # no s_0 prepended
+            embedded_lengths = a_h_len_flat
         else:
-            outputs, (h_n, c_n) = self.lstm(embedded_s_a)
+            projected_s_0 = state_embed.unsqueeze(1)  # [B*R, 1, unit_size]
+            embedded_s_a = torch.cat((projected_s_0, embedded_actions), dim=1)
+            embedded_lengths = a_h_len_flat + 1
+
+        # Pack and RNN
+        packed_s_a = nn.utils.rnn.pack_padded_sequence(
+            embedded_s_a, embedded_lengths.to("cpu"), batch_first=True, enforce_sorted=False
+        )
+
+        if self.rnn_type.upper() == 'GRU':
+            packed_outputs, rnn_hxs = self.gru(packed_s_a)
+        else:
+            packed_outputs, (h_n, c_n) = self.lstm(packed_s_a)
             rnn_hxs = h_n
 
-        # rnn_hxs shape = (num_layers, B_rolled, unit_size)
-        # we want the last layer's hidden state per sequence: (B_rolled, unit_size)
-        #print(f"rnn_hxs size{rnn_hxs.size()}")
-        final_hidden = rnn_hxs[-1]
+        final_hidden = rnn_hxs[-1]  # [B*R, unit_size]
+        # Fuse with s_0 after RNN if enabled
+        if self.fuse_s_0:
+            # You can either add or concat — here we concat and project
+            fused = final_hidden + state_embed  # [B*R, unit_size]
+            final_hidden = fused
 
-        # 3) optional projection to `hidden_size`
+        # Optional projection
         if self._use_linear:
-            final_hidden = self.proj(final_hidden)  # shape (B_rolled, hidden_size)
+            final_hidden = self.proj(final_hidden)  # [B*R, hidden_size]
             out_dim = self.hidden_size
         else:
             out_dim = self.unit_size
 
-        # 4) Reshape back to (B, R, out_dim)
-        final_hidden = final_hidden.view(B, R, out_dim)
-        #print(f"final_hidden size{final_hidden.size()}")
-        behavior_embedding = final_hidden.mean(dim=1)
+
+
+        final_hidden = final_hidden.view(B, R, out_dim)  # [B, R, out_dim]
+        behavior_embedding = final_hidden.mean(dim=1)  # [B, out_dim]
 
         return behavior_embedding
+
 
 class StateBehaviorEncoder(NNBase):
     def __init__(
@@ -246,7 +245,7 @@ class StateBehaviorEncoder(NNBase):
         
         self.state_projector = nn.Linear(hidden_size, unit_size)
 
-    def forward(self, s_h, a_h):
+    def forward(self, s_h, a_h, s_h_len, a_h_len):
         """
         Encode a sequence of states using an RNN.
         
@@ -266,15 +265,22 @@ class StateBehaviorEncoder(NNBase):
 
         # Reshape to sequence form: [BR, T, unit_size]
         projected_state_seq = projected_state.view(BR, T, self.unit_size)
+        s_h_len_flat = s_h_len.view(BR)
 
         # Transpose for RNN: [T, BR, unit_size]
-        embedded_s = projected_state_seq.transpose(0, 1)
+        # embedded_s = projected_state_seq.transpose(0, 1)
+        packed_s = pack_padded_sequence(
+            projected_state_seq, 
+            lengths=s_h_len_flat.cpu(), 
+            batch_first=True, 
+            enforce_sorted=False
+        )
 
         # Run RNN
         if self.rnn_type.upper() == 'GRU':
-            outputs, rnn_hxs = self.gru(embedded_s)  # rnn_hxs: [num_layers, BR, unit_size]
+            packed_outputs, rnn_hxs = self.gru(packed_s)  # rnn_hxs: [num_layers, BR, unit_size]
         else:
-            outputs, (h_n, c_n) = self.lstm(embedded_s)
+            packed_outputs, (h_n, c_n) = self.lstm(packed_s)
             rnn_hxs = h_n
 
         # Get last hidden state from top layer: [BR, unit_size]
@@ -789,7 +795,7 @@ class VAE(torch.nn.Module):
 
         return kl_div
 
-    def forward(self, programs, program_masks, teacher_enforcing, deterministic=True, a_h=None, s_h=None):
+    def forward(self, programs, program_masks, teacher_enforcing, a_h, s_h, a_h_len, s_h_len, deterministic=True):
         program_lens = program_masks.squeeze().sum(dim=-1)
 
         t = time.time()
@@ -816,23 +822,22 @@ class VAE(torch.nn.Module):
         pre_tanh_z = z
         if self._tanh_after_sample:
             z = self.tanh(z)
+
+        pre_tanh_b_z = self.behavior_encoder(s_h, a_h, s_h_len, a_h_len) #pretanh behavior embedding
+        b_z = self.tanh(pre_tanh_b_z)
+        #print(f"z.shape: {z.shape}, b_z.shape: {b_z.shape}")
+        
         
         t = time.time()
-        outputs = self.decoder(programs, z, teacher_enforcing=teacher_enforcing, deterministic=deterministic)
+        z_outputs = self.decoder(programs, z, teacher_enforcing=teacher_enforcing, deterministic=deterministic)
+        b_z_outputs = self.decoder(programs, b_z, teacher_enforcing=teacher_enforcing, deterministic=deterministic)
+
         decoder_time = time.time() - t
 
-        if a_h is not None and s_h is not None:
-
-            pre_tanh_b_z = self.behavior_encoder(s_h, a_h) #pretanh behavior embedding
-            b_z = self.tanh(pre_tanh_b_z)
-            #print(f"z.shape: {z.shape}, b_z.shape: {b_z.shape}")
-            return outputs, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z
+        return z_outputs, b_z_outputs, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z
 
 
-        else:
-            pre_tanh_b_z = None
-            b_z = None
-            return outputs, z, pre_tanh_z, encoder_time, decoder_time
+
 
 
 class ConditionPolicy(NNBase):
@@ -1110,21 +1115,47 @@ class ProgramVAE(nn.Module):
     def is_recurrent(self):
         return self.vae.program_encoder.is_recurrent
 
-    def forward(self, programs, program_masks, s_h, a_h, rnn_hxs=None, masks=None, action=None, output_mask_all=None, eop_action=None,
+    def forward(self, programs, program_masks, s_h, a_h, s_h_len, a_h_len, rnn_hxs=None, masks=None, action=None, output_mask_all=None, eop_action=None,
                 agent_actions=None, agent_action_masks=None, deterministic=False, evaluate=False):
         #print(f"a_h.shape: {a_h.shape}")
         #print(f"s_h.shape: {init_states.shape}")
         init_states = s_h[:, :, 0, :, :, :].unsqueeze(2)
         # print(f"init_states.shape: {init_states.shape}")
         if self.vae.decoder.setup == 'supervised':
-            output, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = s_h)
-            _, pred_programs, pred_programs_len, _, output_logits, eop_pred_programs, eop_output_logits, pred_program_masks, _ = output
+            z_output, b_z_output, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = s_h, a_h_len = a_h_len, s_h_len = s_h_len)
+            _, z_pred_programs, z_pred_programs_len, _, z_output_logits, z_eop_pred_programs, z_eop_output_logits, z_pred_program_masks, _ = z_output
+            _, b_z_pred_programs, b_z_pred_programs_len, _, b_z_output_logits, b_z_eop_pred_programs, b_z_eop_output_logits, b_z_pred_program_masks, _ = b_z_output
             _, _, _, z_action_logits, z_action_masks, _ = self.condition_policy(init_states, a_h, z, self.teacher_enforcing,
                                                                          deterministic=deterministic)
             _, _, _, b_z_action_logits, b_z_action_masks, _ = self.condition_policy(init_states, a_h, b_z, self.teacher_enforcing,
                                                                          deterministic=deterministic)
-            return pred_programs, pred_programs_len, output_logits, eop_pred_programs, eop_output_logits, \
-                   pred_program_masks, z_action_logits, z_action_masks, b_z_action_logits, b_z_action_masks, z, pre_tanh_z, encoder_time, decoder_time, b_z, pre_tanh_b_z
+            z_output = {
+                'pred_programs': z_pred_programs,
+                'pred_programs_len': z_pred_programs_len,
+                'output_logits': z_output_logits,
+                'eop_pred_programs': z_eop_pred_programs,
+                'eop_output_logits': z_eop_output_logits,
+                'pred_program_masks': z_pred_program_masks,
+                'action_logits': z_action_logits,
+                'action_masks': z_action_masks,
+                'pre_tanh': pre_tanh_z,
+                'z': z,
+            }
+
+            b_z_output = {
+                'pred_programs': b_z_pred_programs,
+                'pred_programs_len': b_z_pred_programs_len,
+                'output_logits': b_z_output_logits,
+                'eop_pred_programs': b_z_eop_pred_programs,
+                'eop_output_logits': b_z_eop_output_logits,
+                'pred_program_masks': b_z_pred_program_masks,
+                'action_logits': b_z_action_logits,
+                'action_masks': b_z_action_masks,
+                'pre_tanh': pre_tanh_b_z,
+                'z': b_z,
+            }
+
+            return z_output, b_z_output, encoder_time, decoder_time
 
         # output, z = self.vae(programs, program_masks, self.teacher_enforcing)
         """ VAE forward pass """
