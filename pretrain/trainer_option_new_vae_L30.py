@@ -368,8 +368,8 @@ def _temp(config, args):
 
 if __name__ == "__main__":
     # wandb_project_name = input("Please enter the wandb project name: ")
-    # wandb_session_name = input("Please enter the wandb session name: ")
-    # wandb.init(project="DRLGS", name=wandb_session_name)
+    wandb_session_name = input("Please enter the wandb session name: ")
+    wandb.init(project="DRLGS_latent", name=wandb_session_name)
 
     #torch.set_num_threads(2)
     torch.set_num_threads(1)
