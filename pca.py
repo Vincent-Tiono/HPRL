@@ -5,6 +5,7 @@ from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import traceback
 import re
+from typing import List, Tuple, Optional
 from pretrain.models_option_new_vae import ActionBehaviorEncoder, ProgramEncoder
 from karel_env.dsl import get_DSL_option_v2
 from torch.autograd import Variable
@@ -40,7 +41,7 @@ def load_encoders():
     }
 
     # Initialize behavior encoder
-    behavior_encoder = BehaviorEncoder(
+    behavior_encoder = ActionBehaviorEncoder(
         recurrent=config['recurrent_policy'],
         num_actions=config['dsl']['num_agent_actions'],
         hidden_size=config['num_lstm_cell_units'],
@@ -131,29 +132,33 @@ def get_exec_data(hdf5_file, program_id, num_agent_actions):
         s_h = np.stack(list(results))
         
         return s_h, a_h, a_h_len
+    except Exception as e:
+        print(f"Error extracting execution data for program_id '{program_id}': {e}")
+        traceback.print_exc()
+        return np.array([]), np.array([]), np.array([])
+
+def load_programs_from_txt(file_path: str) -> List[Tuple[str, Optional[str]]]:
+    """Load program IDs and code from text file.
     
-    def load_programs_from_txt(self, file_path: str) -> List[Tuple[str, Optional[str]]]:
-        """Load program IDs and code from text file.
+    Args:
+        file_path: Path to the text file
         
-        Args:
-            file_path: Path to the text file
-            
-        Returns:
-            List of tuples (program_id, program_code)
-        """
-        program_data = []
-        try:
-            with open(file_path, 'r') as f:
-                for line in f.readlines():
-                    parts = line.strip().split()
-                    if parts:
-                        program_id = parts[0]
-                        program_code = ' '.join(parts[1:]) if len(parts) > 1 else None
-                        program_data.append((program_id, program_code))
-        except Exception as e:
-            print(f"Error loading programs from {file_path}: {e}")
-            traceback.print_exc()
-        return program_data
+    Returns:
+        List of tuples (program_id, program_code)
+    """
+    program_data = []
+    try:
+        with open(file_path, 'r') as f:
+            for line in f.readlines():
+                parts = line.strip().split()
+                if parts:
+                    program_id = parts[0]
+                    program_code = ' '.join(parts[1:]) if len(parts) > 1 else None
+                    program_data.append((program_id, program_code))
+    except Exception as e:
+        print(f"Error loading programs from {file_path}: {e}")
+        traceback.print_exc()
+    return program_data
 
 
 class Encoder:
@@ -252,37 +257,82 @@ class Encoder:
         
         return mu + sigma * Variable(std_z, requires_grad=False)
 
-        # Encode program
-        with torch.no_grad():
-            # Get the output from the encoder
-            _, encoder_output = program_encoder(tokens_tensor, src_len)
+def encode_demos(programs, behavior_encoder):
+    """
+    Encode program demonstrations using behavior encoder.
+    
+    Wrapper function for Encoder.encode_demos
+    
+    Args:
+        programs: List of program data tuples
+        behavior_encoder: Behavior encoder model
+        
+    Returns:
+        Tuple of encoded vectors and program IDs
+    """
+    return Encoder.encode_demos(programs, behavior_encoder)
+    
+def encode_programs(program_data, program_encoder, dsl):
+    """
+    Encode program source code using program encoder.
+    
+    Wrapper function for Encoder.encode_programs
+    
+    Args:
+        program_data: List of program data tuples
+        program_encoder: Program encoder model
+        dsl: DSL object for parsing
+        
+    Returns:
+        Tuple of encoded vectors and program IDs
+    """
+    return Encoder.encode_programs(program_data, program_encoder, dsl)
+
+def process_hdf5_file(hdf5_file_path, behavior_encoder):
+    """
+    Process an HDF5 file to extract program data for behavior encoding.
+    
+    Args:
+        hdf5_file_path: Path to the HDF5 file
+        behavior_encoder: Behavior encoder model
+        
+    Returns:
+        List of program data tuples for encoding
+    """
+    programs = []
+    try:
+        with h5py.File(hdf5_file_path, 'r') as hdf5_file:
+            num_agent_actions = 6  # Assuming 6 actions based on config
             
-            z = _sample_latent(encoder_output.squeeze(), 64)
+            # Get all program IDs
+            program_ids = list(hdf5_file.keys())
+            print(f"Found {len(program_ids)} programs in HDF5 file")
             
-            latent_vectors.append(z.cpu().numpy())
-            program_ids.append(program_id)
+            for program_id in program_ids:
+                s_h, a_h, a_h_len = get_exec_data(hdf5_file, program_id, num_agent_actions)
+                if len(s_h) > 0:
+                    programs.append((program_id, s_h, a_h, a_h_len))
+                    
+            print(f"Successfully processed {len(programs)} programs")
+            
+    except Exception as e:
+        print(f"Error processing HDF5 file {hdf5_file_path}: {e}")
+        traceback.print_exc()
+        
+    return programs
 
-
-    # Print encoding statistics
-    print(f"\nENCODING STATISTICS:")
-    print(f"Input programs: {total_input_programs}")
-    print(f"Programs successfully encoded: {programs_with_encoding}")
-    print(f"Total encodings generated: {len(latent_vectors)}")
-
-
-    # Convert list of arrays to single numpy array
-    if latent_vectors:
-        # Check if all vectors have the same shape
-        shapes = [lv.shape for lv in latent_vectors]
-        if len(set(shapes)) > 1:
-            print(f"Warning: Different shapes in latent vectors: {set(shapes)}")
-            # Find common dimension or pad/truncate as needed
-            min_dim = min([lv.shape[1] for lv in latent_vectors])
-            latent_vectors = [lv[:, :min_dim] for lv in latent_vectors]
-
-        return np.vstack(latent_vectors), program_ids
-    else:
-        return np.array([]), []
+def load_program_from_txt(file_path, dsl):
+    """
+    Load program data from a text file.
+    
+    Args:
+        file_path: Path to the text file
+        dsl: DSL object for parsing
+        
+    Returns:
+        List of program data tuples
+    """
+    return load_programs_from_txt(file_path)
 
 def main():
     """
@@ -311,7 +361,7 @@ def main():
         all_behavior_program_ids = []
 
         # Specify the HDF5 file path
-        hdf5_file_path = "karel_dataset/data.hdf5"
+        hdf5_file_path = "data.hdf5"
         print(f"Processing {hdf5_file_path}")
         programs = process_hdf5_file(hdf5_file_path, behavior_encoder)
 
@@ -326,7 +376,7 @@ def main():
         all_program_ids = []
 
         # Specify the TXT file path
-        txt_file_path = "karel_dataset/id.txt"
+        txt_file_path = "id.txt"
         print(f"Processing {txt_file_path}")
         program_data = load_program_from_txt(txt_file_path, dsl)
 
@@ -435,4 +485,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
