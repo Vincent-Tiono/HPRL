@@ -7,3 +7,5 @@ karel_dataset/
 **/wandb
 /py3129
 /venv
+*.hdf5
+data.hdf5
