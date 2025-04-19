@@ -362,52 +362,55 @@ class SupervisedModel(BaseModel):
             'encoder_time': encoder_time,
             'decoder_time': decoder_time}
 
-        if mode == "train":
+        if mode in ("train", "eval"):
             wandb.log({
-                # Flat scalar losses
-                'loss/total': loss.detach().cpu().numpy().item(),
-                'loss/z_rec': z_rec_loss.detach().cpu().numpy().item(),
-                'loss/b_z_rec': b_z_rec_loss.detach().cpu().numpy().item(),
-                'loss/lat': lat_loss.detach().cpu().numpy().item(),
-                'loss/z_condition': z_condition_loss.detach().cpu().numpy().item(),
-                'loss/b_z_condition': b_z_condition_loss.detach().cpu().numpy().item(),
-                'loss/clip': clip_loss.detach().cpu().numpy().item(),
-                'loss/clip_accuracy': clip_acc.detach().cpu().numpy().item(),
-                'loss/contrastive': contrastive_loss.detach().cpu().numpy().item(),
+                f'{mode}/loss/total': loss.item(),
+                f'{mode}/loss/z_rec': z_rec_loss.item(),
+                f'{mode}/loss/b_z_rec': b_z_rec_loss.item(),
+                f'{mode}/loss/lat': lat_loss.item(),
+                f'{mode}/loss/z_condition': z_condition_loss.item(),
+                f'{mode}/loss/b_z_condition': b_z_condition_loss.item(),
+                f'{mode}/loss/clip': clip_loss.item(),
+                f'{mode}/loss/clip_accuracy': clip_acc.item(),
+                f'{mode}/loss/contrastive': contrastive_loss.item(),
 
-                # z vs b_z — will be plotted on same chart using nested dict
-                'z_vs_b/decoder_token_accuracy': {
-                    'z': z_t_accuracy.detach().cpu().numpy().item(),
-                    'b_z': b_z_t_accuracy.detach().cpu().numpy().item()
+                f'{mode}/z_vs_b/decoder_token_accuracy': {
+                    'z': z_t_accuracy.item(),
+                    'b_z': b_z_t_accuracy.item()
                 },
-                'z_vs_b/decoder_program_accuracy': {
-                    'z': z_p_accuracy.detach().cpu().numpy().item(),
-                    'b_z': b_z_p_accuracy.detach().cpu().numpy().item()
+                f'{mode}/z_vs_b/decoder_program_accuracy': {
+                    'z': z_p_accuracy.item(),
+                    'b_z': b_z_p_accuracy.item()
                 },
-                'z_vs_b/condition_action_accuracy': {
-                    'z': z_cond_t_accuracy.detach().cpu().numpy().item(),
-                    'b_z': b_z_cond_t_accuracy.detach().cpu().numpy().item()
+                f'{mode}/z_vs_b/condition_action_accuracy': {
+                    'z': z_cond_t_accuracy.item(),
+                    'b_z': b_z_cond_t_accuracy.item()
                 },
-                'z_vs_b/condition_demo_accuracy': {
-                    'z': z_cond_p_accuracy.detach().cpu().numpy().item(),
-                    'b_z': b_z_cond_p_accuracy.detach().cpu().numpy().item()
-                },
-                'z_vs_b/decoder_greedy_token_accuracy': {
-                    'z': z_greedy_t_accuracy.detach().cpu().numpy().item(),
-                    'b_z': b_z_greedy_t_accuracy.detach().cpu().numpy().item()
-                },
-                'z_vs_b/decoder_greedy_program_accuracy': {
-                    'z': z_greedy_p_accuracy.detach().cpu().numpy().item(),
-                    'b_z': b_z_greedy_p_accuracy.detach().cpu().numpy().item()
-                },
-                'z_vs_b/condition_greedy_action_accuracy': {
-                    'z': z_greedy_a_accuracy.detach().cpu().numpy().item(),
-                    'b_z': b_z_greedy_a_accuracy.detach().cpu().numpy().item()
-                },
-                'z_vs_b/condition_greedy_demo_accuracy': {
-                    'z': z_greedy_d_accuracy.detach().cpu().numpy().item(),
-                    'b_z': b_z_greedy_d_accuracy.detach().cpu().numpy().item()
+                f'{mode}/z_vs_b/condition_demo_accuracy': {
+                    'z': z_cond_p_accuracy.item(),
+                    'b_z': b_z_cond_p_accuracy.item()
                 },
             })
+        if mode == "eval":
+            wandb.log({
+                f'{mode}/z_vs_b/decoder_greedy_token_accuracy': {
+                    'z': z_greedy_t_accuracy.item(),
+                    'b_z': b_z_greedy_t_accuracy.item()
+                },
+                f'{mode}/z_vs_b/decoder_greedy_program_accuracy': {
+                    'z': z_greedy_p_accuracy.item(),
+                    'b_z': b_z_greedy_p_accuracy.item()
+                },
+                f'{mode}/z_vs_b/condition_greedy_action_accuracy': {
+                    'z': z_greedy_a_accuracy.item(),
+                    'b_z': b_z_greedy_a_accuracy.item()
+                },
+                f'{mode}/z_vs_b/condition_greedy_demo_accuracy': {
+                    'z': z_greedy_d_accuracy.item(),
+                    'b_z': b_z_greedy_d_accuracy.item()
+                },
+            })
+
+
 
         return batch_info
