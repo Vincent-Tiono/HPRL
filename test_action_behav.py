@@ -42,13 +42,13 @@ class EncoderConfig:
     input_channel: int = 8
     input_height: int = 8
     input_width: int = 8
-    fuse_s_0: bool = False
+    fuse_s_0: bool = True
 
 
 class EncoderManager:
     """Manages loading and initialization of behavior and program encoders."""
     
-    def __init__(self, model_path: str = 'final_params.ptp'):
+    def __init__(self, model_path: str = 'best_valid_params.ptp'):
         """Initialize the encoder manager.
         
         Args:
@@ -155,9 +155,9 @@ class DataProcessor:
                 
                 for program_id in sample_keys:
                     try:
-                        s_h, a_h, a_h_len = self._get_exec_data(f, program_id, behavior_encoder.num_actions)
+                        s_h, s_h_len, a_h, a_h_len = self._get_exec_data(f, program_id, behavior_encoder.num_actions)
                         if len(s_h) > 0 and len(a_h) > 0:
-                            programs.append((program_id, s_h, a_h, a_h_len))
+                            programs.append((program_id, s_h, s_h_len, a_h, a_h_len))
                     except Exception as e:
                         print(f"Error processing program {program_id}: {e}")
                         traceback.print_exc()
@@ -186,13 +186,14 @@ class DataProcessor:
                 assert s_h_len[i] == 1
                 a_h_len[i] += 1
                 s_h_len[i] += 1
-                s_h[i][1, :, :, :] = s_h[i][0, :, :, :]
+                s_h[i][1] = s_h[i][0]
                 a_h[i][0] = num_agent_actions - 1
                 
-        results = map(lambda x: np.expand_dims(x[0][0], 0), zip(s_h, s_h_len))
-        s_h = np.stack(list(results))
-        
-        return s_h, a_h, a_h_len
+        # results = map(lambda x: np.expand_dims(x[0][0], 0), zip(s_h, s_h_len))
+        # s_h = np.stack(list(results))
+        # print(f"s_h.shape: {s_h.shape}, s_h_len.shape: {s_h_len.shape}, a_h.shape: {a_h.shape}, a_h_len.shape: {a_h_len.shape}\n")
+
+        return s_h, s_h_len, a_h, a_h_len
     
     def load_programs_from_txt(self, file_path: str) -> List[Tuple[str, Optional[str]]]:
         """Load program IDs and code from text file.
@@ -235,20 +236,34 @@ class Encoder:
         latent_vectors = []
         program_ids = []
         
-        for program_id, s_h, a_h, a_h_len in programs:
+        for program_id, s_h, s_h_len, a_h, a_h_len in programs:
             try:
-                s_h_tensor = torch.FloatTensor(s_h)
-                a_h_tensor = torch.LongTensor(a_h)
+                # Convert to torch tensors
+                s_h_tensor = torch.tensor(s_h, dtype=torch.float32)  # (num_demos, T, C, H, W)
+                s_h_len_tensor = torch.tensor(s_h_len, dtype=torch.int16)  # (num_demos)
+                a_h_tensor = torch.tensor(a_h, dtype=torch.int16)   # (num_demos, T)
+                a_h_len_tensor = torch.tensor(a_h_len, dtype=torch.int16)  # (num_demos)
                 
-                if len(a_h_tensor.shape) == 1:
-                    a_h_tensor = a_h_tensor.unsqueeze(0)
-                    
-                s_0_tensor = s_h_tensor.unsqueeze(0)
-                a_h_tensor = a_h_tensor.unsqueeze(0)
+                # print(f"s_h_tensor.shape: {s_h_tensor.shape}, s_h_len_tensor.shape: {s_h_len_tensor.shape}, a_h_tensor.shape: {a_h_tensor.shape}, a_h_len_tensor.shape: {a_h_len_tensor.shape}\n")
+
+                # BehaviorEncoder expects: 
+                # s_h: shape (B, R, T, C, H, W) - B=batch_size, R=num_demos_per_program
+                # a_h: shape (B, R, T)
+                # s_h_len: shape (B, R)
+                # a_h_len: shape (B, R)
+                
+                # Add batch dimension (B=1)
+                s_h_batch = s_h_tensor.unsqueeze(0)  # (1, num_demos, T, C, H, W)
+                a_h_batch = a_h_tensor.unsqueeze(0)  # (1, num_demos, T)
+                s_h_len_batch = s_h_len_tensor.unsqueeze(0)  # (1, num_demos)
+                a_h_len_batch = a_h_len_tensor.unsqueeze(0)  # (1, num_demos)
+                
+                # print(f"s_h_batch.shape: {s_h_batch.shape}, s_h_len_batch.shape: {s_h_len_batch.shape}, a_h_batch.shape: {a_h_batch.shape}, a_h_len_batch.shape: {a_h_len_batch.shape}\n")
                 
                 with torch.no_grad():
-                    latent = behavior_encoder(s_0_tensor, a_h_tensor)
-                    latent = latent.squeeze()
+                    # Forward pass through behavior encoder
+                    latent = behavior_encoder(s_h_batch, a_h_batch, s_h_len_batch, a_h_len_batch)
+                    # latent shape: (1, out_dim)
                     latent_vectors.append(latent.cpu().numpy())
                     program_ids.append(program_id)
                     
@@ -475,4 +490,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()

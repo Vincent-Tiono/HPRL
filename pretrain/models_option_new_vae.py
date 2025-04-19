@@ -177,8 +177,6 @@ class ActionBehaviorEncoder(NNBase):
         else:
             out_dim = self.unit_size
 
-
-
         final_hidden = final_hidden.view(B, R, out_dim)  # [B, R, out_dim]
         behavior_embedding = final_hidden.mean(dim=1)  # [B, out_dim]
 
@@ -822,10 +820,13 @@ class VAE(torch.nn.Module):
         pre_tanh_z = z
         if self._tanh_after_sample:
             z = self.tanh(z)
+            
+        print(f"s_h.shape: {s_h.shape}, a_h.shape: {a_h.shape}, s_h_len.shape: {s_h_len.shape}, a_h_len.shape: {a_h_len.shape}\n")
 
         pre_tanh_b_z = self.behavior_encoder(s_h, a_h, s_h_len, a_h_len) #pretanh behavior embedding
         b_z = self.tanh(pre_tanh_b_z)
-        #print(f"z.shape: {z.shape}, b_z.shape: {b_z.shape}")
+        
+        # print(f"z.shape: {z.shape}, pre_tanh_b_z_shape: {pre_tanh_b_z.shape}, b_z.shape: {b_z.shape}\n")
         
         
         t = time.time()
