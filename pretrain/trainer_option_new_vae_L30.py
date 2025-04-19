@@ -134,7 +134,8 @@ def get_exec_data(hdf5_file, program_id, num_agent_actions):
             s_h_len[i] += 1
             s_h[i][1] = s_h[i][0]
             a_h[i][0] = num_agent_actions - 1
-
+            
+    print(f"s_h.shape: {s_h.shape}, s_h_len.shape: {s_h_len.shape}, a_h.shape: {a_h.shape}, a_h_len.shape: {a_h_len.shape}\n")
     return s_h, s_h_len, a_h, a_h_len
 
 
