@@ -8,9 +8,6 @@ This module provides functionality to:
 4. Encode program behaviors and source code
 5. Perform PCA analysis and visualization
 6. Compare and analyze the encodings
-
-Author: Vincent Chang
-Date: 2024
 """
 
 import torch

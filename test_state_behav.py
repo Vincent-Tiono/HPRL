@@ -1,12 +1,16 @@
 """
-PCA Analysis Tool for Program Encoder and Behavior Encoder:
+PCA Analysis Tool for Program Behavior and Source Code Encodings
 
-1. Load pre-trained encoders
-2. Process behaviors from HDF5 files
-3. Process programs from txt files
-4. Encode behaviors and programs
+This module provides functionality to:
+1. Load and manage pre-trained encoders
+2. Process program execution data from HDF5 files
+3. Process program source code from text files
+4. Encode program behaviors and source code
 5. Perform PCA analysis and visualization
 6. Compare and analyze the encodings
+
+Author: Vincent Chang
+Date: 2024
 """
 
 import torch
@@ -24,6 +28,8 @@ import torch.nn.functional as F
 from typing import Tuple, List, Dict, Any, Optional
 from dataclasses import dataclass
 
+
+@dataclass
 class EncoderConfig:
     """Configuration for encoder models."""
     recurrent_policy: bool = True
@@ -36,14 +42,13 @@ class EncoderConfig:
     input_channel: int = 8
     input_height: int = 8
     input_width: int = 8
-    fuse_s_0: bool = False
-    
+    fuse_s_0: bool = True
 
 
 class EncoderManager:
     """Manages loading and initialization of behavior and program encoders."""
     
-    def __init__(self, model_path: str = 'final_params.ptp'):
+    def __init__(self, model_path: str = 'best_valid_params.ptp'):
         """Initialize the encoder manager.
         
         Args:
@@ -85,7 +90,7 @@ class EncoderManager:
             input_channel=config.input_channel,
             input_height=config.input_height,
             input_width=config.input_width,
-            fuse_s_0=False
+            fuse_s_0=config.fuse_s_0
         )
         
         state_dict = {
@@ -150,9 +155,9 @@ class DataProcessor:
                 
                 for program_id in sample_keys:
                     try:
-                        s_h, a_h, a_h_len = self._get_exec_data(f, program_id, behavior_encoder.num_actions)
+                        s_h, s_h_len, a_h, a_h_len = self._get_exec_data(f, program_id, behavior_encoder.num_actions)
                         if len(s_h) > 0 and len(a_h) > 0:
-                            programs.append((program_id, s_h, a_h, a_h_len))
+                            programs.append((program_id, s_h, s_h_len, a_h, a_h_len))
                     except Exception as e:
                         print(f"Error processing program {program_id}: {e}")
                         traceback.print_exc()
@@ -162,32 +167,90 @@ class DataProcessor:
             traceback.print_exc()
             return []
     
-    def _get_exec_data(self, hdf5_file, program_id: str, num_agent_actions: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Extract execution data from HDF5 file for a given program."""
-        if program_id not in hdf5_file or 's_h' not in hdf5_file[program_id]:
-            return np.array([]), np.array([]), np.array([])
-            
-        s_h = np.moveaxis(np.copy(hdf5_file[program_id]['s_h']), [-1,-2,-3], [-3,-1,-2])
-        a_h = np.copy(hdf5_file[program_id]['a_h'])
-        s_h_len = np.copy(hdf5_file[program_id]['s_h_len'])
-        a_h_len = np.copy(hdf5_file[program_id]['a_h_len'])
+    def _get_exec_data(self, hdf5_file, program_id: str, num_agent_actions: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Get execution data for a program.
         
-        if s_h.shape[1] == 1:
-            s_h = np.concatenate((np.copy(s_h), np.copy(s_h)), axis=1)
-            a_h = np.ones((s_h.shape[0], 1))
+        Args:
+            hdf5_file: HDF5 file object
+            program_id: Program ID
+            num_agent_actions: Number of possible agent actions
             
-        for i in range(s_h_len.shape[0]):
-            if a_h_len[i] == 0:
-                assert s_h_len[i] == 1
-                a_h_len[i] += 1
-                s_h_len[i] += 1
-                s_h[i][1, :, :, :] = s_h[i][0, :, :, :]
-                a_h[i][0] = num_agent_actions - 1
+        Returns:
+            Tuple of (state_history, state_lengths, action_history, action_lengths)
+        """
+        if program_id not in hdf5_file:
+            raise ValueError(f"Program {program_id} not found in HDF5 file")
+        
+        if 's_h' not in hdf5_file[program_id]:
+            raise ValueError(f"No state history found for program {program_id}")
+        
+        # Get state history and reshape to (num_demos, T, C, H, W)
+        s_h = hdf5_file[program_id]['s_h'][:]  # (C, num_demos, T, H, W)
+        s_h = np.moveaxis(s_h, [0, 1, 2], [2, 0, 1])  # (num_demos, T, C, H, W)
+        
+        # Get action history and reshape to (num_demos, T)
+        a_h = hdf5_file[program_id]['a_h'][:]  # (T, num_demos)
+        a_h = np.moveaxis(a_h, [0, 1], [1, 0])  # (num_demos, T)
+        
+        # Get sequence lengths
+        s_h_len = hdf5_file[program_id]['s_h_len'][:]  # (num_demos,)
+        a_h_len = hdf5_file[program_id]['a_h_len'][:]  # (num_demos,)
+        
+        # Ensure at least 2 timesteps for each demo
+        for i in range(len(s_h)):
+            if s_h_len[i] == 1:
+                # For single timestep demos, duplicate the state
+                # First get the single state
+                single_state = s_h[i, 0:1]  # Keep the channel dimension
+                # Create a new array with the correct shape
+                new_state = np.zeros((2, s_h.shape[2], s_h.shape[3], s_h.shape[4]), dtype=s_h.dtype)
+                # Copy the single state to both positions
+                new_state[0] = single_state[0]
+                new_state[1] = single_state[0]
+                # Create a new array for the entire demo sequence
+                new_demo = np.zeros((s_h.shape[1], s_h.shape[2], s_h.shape[3], s_h.shape[4]), dtype=s_h.dtype)
+                # Copy the new state sequence into the first two positions
+                new_demo[:2] = new_state
+                # Assign the new demo sequence
+                s_h[i] = new_demo
+                s_h_len[i] = 2
                 
-        results = map(lambda x: np.expand_dims(x[0][0], 0), zip(s_h, s_h_len))
-        s_h = np.stack(list(results))
+                # Create new action array with correct shape
+                new_actions = np.zeros((2,), dtype=a_h.dtype)
+                a_h[i] = new_actions
+                a_h_len[i] = 2
         
-        return s_h, a_h, a_h_len
+        # Handle empty action sequences
+        for i in range(len(a_h)):
+            if a_h_len[i] == 0:
+                # Create a new array with the correct shape for dummy actions
+                new_actions = np.zeros((2,), dtype=a_h.dtype)
+                # Assign the new actions array
+                a_h[i] = new_actions
+                a_h_len[i] = 2
+                
+                # Ensure state sequence matches
+                if s_h_len[i] == 1:
+                    single_state = s_h[i, 0:1]
+                    new_state = np.zeros((2, s_h.shape[2], s_h.shape[3], s_h.shape[4]), dtype=s_h.dtype)
+                    new_state[0] = single_state[0]
+                    new_state[1] = single_state[0]
+                    # Create a new array for the entire demo sequence
+                    new_demo = np.zeros((s_h.shape[1], s_h.shape[2], s_h.shape[3], s_h.shape[4]), dtype=s_h.dtype)
+                    # Copy the new state sequence into the first two positions
+                    new_demo[:2] = new_state
+                    # Assign the new demo sequence
+                    s_h[i] = new_demo
+                    s_h_len[i] = 2
+        
+        # Print shapes for debugging
+        print(f"\nProgram {program_id} data shapes:")
+        print(f"s_h: {s_h.shape}")
+        print(f"s_h_len: {s_h_len.shape}")
+        print(f"a_h: {a_h.shape}")
+        print(f"a_h_len: {a_h_len.shape}")
+        
+        return s_h, s_h_len, a_h, a_h_len
     
     def load_programs_from_txt(self, file_path: str) -> List[Tuple[str, Optional[str]]]:
         """Load program IDs and code from text file.
@@ -230,98 +293,32 @@ class Encoder:
         latent_vectors = []
         program_ids = []
         
-        for program_id, s_h, a_h, a_h_len in programs:
+        for program_id, s_h, s_h_len, a_h, a_h_len in programs:
             try:
-                # Convert numpy arrays to tensors
-                s_h_tensor = torch.FloatTensor(s_h)
-                a_h_tensor = torch.LongTensor(a_h)
+                # Convert to torch tensors
+                s_h_tensor = torch.tensor(s_h, dtype=torch.float32)  # (num_demos, T, C, H, W)
+                s_h_len_tensor = torch.tensor(s_h_len, dtype=torch.int16)  # (num_demos,)
+                a_h_tensor = torch.tensor(a_h, dtype=torch.int16)   # (num_demos, T)
+                a_h_len_tensor = torch.tensor(a_h_len, dtype=torch.int16)  # (num_demos,)
                 
-                # Handle different input dimensions
-                if len(s_h_tensor.shape) == 5:  # [B, T, C, H, W] or similar
-                    # This handles tensors of shape [10, 1, 8, 8, 8]
-                    B, T, C, H, W = s_h_tensor.shape
-                    
-                    # Reshape to [B, 1, T, C, H, W] - adding rollout dimension
-                    s_h_tensor = s_h_tensor.unsqueeze(1)  # [B, 1, T, C, H, W]
-                    
-                    # Prepare sequence lengths
-                    if isinstance(a_h_len, (int, np.integer)):
-                        a_h_len_tensor = torch.LongTensor([a_h_len])
-                    else:
-                        a_h_len_tensor = torch.LongTensor(a_h_len)
-                    
-                    s_h_len_tensor = torch.LongTensor([T] * B)
-                    
-                    # Make sure action tensor has proper shape
-                    if len(a_h_tensor.shape) == 1:  # [T]
-                        a_h_tensor = a_h_tensor.unsqueeze(0)  # [1, T]
-                    
-                    if len(a_h_tensor.shape) == 2:  # [B, T]
-                        a_h_tensor = a_h_tensor.unsqueeze(1)  # [B, 1, T]
-                    
-                    with torch.no_grad():
-                        latent = behavior_encoder(s_h_tensor, a_h_tensor, s_h_len_tensor, a_h_len_tensor)
-                        latent = latent.squeeze()
-                        latent_vectors.append(latent.cpu().numpy())
-                        program_ids.append(program_id)
-                    
-                elif len(s_h_tensor.shape) == 4:  # [T, C, H, W]
-                    time_steps, channels, height, width = s_h_tensor.shape
-                    
-                    # For batch processing, add batch dimension first
-                    s_h_tensor = s_h_tensor.unsqueeze(0)  # [1, T, C, H, W] - B=1
-                    
-                    # Create the required 6D tensor by adding rollout dimension
-                    s_h_tensor = s_h_tensor.unsqueeze(1)  # [1, 1, T, C, H, W] - B=1, R=1
-                    
-                    # Prepare sequence lengths as a tensor with batch dimension
-                    if isinstance(a_h_len, (int, np.integer)):
-                        a_h_len_tensor = torch.LongTensor([a_h_len])
-                    else:
-                        a_h_len_tensor = torch.LongTensor(a_h_len)
-                    
-                    s_h_len_tensor = torch.LongTensor([time_steps])
-                    
-                    # Make sure action tensor has proper shape for batch processing
-                    if len(a_h_tensor.shape) == 1:  # [T]
-                        a_h_tensor = a_h_tensor.unsqueeze(0)  # [1, T] - B=1
-                    
-                    # Run the model with the properly shaped inputs
-                    with torch.no_grad():
-                        latent = behavior_encoder(s_h_tensor, a_h_tensor, s_h_len_tensor, a_h_len_tensor)
-                        latent = latent.squeeze()
-                        latent_vectors.append(latent.cpu().numpy())
-                        program_ids.append(program_id)
-                        
-                elif len(s_h_tensor.shape) == 3:  # [C, H, W] - Single state
-                    channels, height, width = s_h_tensor.shape
-                    
-                    # Add batch, rollout and time dimensions
-                    s_h_tensor = s_h_tensor.unsqueeze(0).unsqueeze(0).unsqueeze(0)  # [1, 1, 1, C, H, W]
-                    
-                    # For a single state, length is 1
-                    s_h_len_tensor = torch.LongTensor([1])
-                    
-                    # Handle action input for single state
-                    if isinstance(a_h_len, (int, np.integer)):
-                        a_h_len_tensor = torch.LongTensor([a_h_len])
-                    else:
-                        a_h_len_tensor = torch.LongTensor(a_h_len)
-                    
-                    # Ensure action has proper shape for single state
-                    if len(a_h_tensor.shape) == 0:  # Scalar
-                        a_h_tensor = a_h_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1]
-                    elif len(a_h_tensor.shape) == 1:  # [T]
-                        a_h_tensor = a_h_tensor.unsqueeze(0)  # [1, T]
-                    
-                    with torch.no_grad():
-                        latent = behavior_encoder(s_h_tensor, a_h_tensor, s_h_len_tensor, a_h_len_tensor)
-                        latent = latent.squeeze()
-                        latent_vectors.append(latent.cpu().numpy())
-                        program_ids.append(program_id)
-                else:
-                    print(f"Unsupported shape for state tensor: {s_h_tensor.shape}")
-                    continue
+                # Add rollout dimension (R=1)
+                s_h_tensor = s_h_tensor.unsqueeze(1)  # (num_demos, 1, T, C, H, W)
+                a_h_tensor = a_h_tensor.unsqueeze(1)  # (num_demos, 1, T)
+                
+                # Print shapes for debugging
+                print(f"\nEncoding program {program_id}:")
+                print(f"Input shapes:")
+                print(f"s_h_tensor: {s_h_tensor.shape}")
+                print(f"a_h_tensor: {a_h_tensor.shape}")
+                print(f"s_h_len_tensor: {s_h_len_tensor.shape}")
+                print(f"a_h_len_tensor: {a_h_len_tensor.shape}")
+                
+                with torch.no_grad():
+                    # Forward pass through behavior encoder
+                    latent = behavior_encoder(s_h_tensor, a_h_tensor, s_h_len_tensor, a_h_len_tensor)
+                    print(f"Output latent shape: {latent.shape}")
+                    latent_vectors.append(latent.cpu().numpy())
+                    program_ids.append(program_id)
                     
             except Exception as e:
                 print(f"Error encoding program {program_id}: {e}")
@@ -349,42 +346,26 @@ class Encoder:
                 continue
                 
             try:
-                # Try to parse the program code
-                try:
-                    program_tokens = dsl.str2intseq(program_code)
-                except Exception:
-                    # Try to fix common program format issues
-                    match = re.search(r'DEF run m\(\) \{(.*?)\}', program_code)
-                    if match:
-                        program_code = f"DEF run m() {{{match.group(1)}}}"
-                        try:
-                            program_tokens = dsl.str2intseq(program_code)
-                        except Exception:
-                            continue
-                    else:
-                        continue
-                
-                # Convert to tensors
-                tokens_tensor = torch.LongTensor(program_tokens).unsqueeze(0)
-                src_len = torch.LongTensor([len(program_tokens)])
-                
-                # Ensure src_len is on CPU to avoid pack_padded_sequence issues
-                src_len = src_len.cpu()
-                
-                # Encode the program
-                with torch.no_grad():
+                program_tokens = dsl.str2intseq(program_code)
+            except:
+                match = re.search(r'DEF run m\(\) \{(.*?)\}', program_code)
+                if match:
+                    program_code = f"DEF run m() {{{match.group(1)}}}"
                     try:
-                        _, encoder_output = program_encoder(tokens_tensor, src_len)
-                        # Sample from the latent space distribution
-                        z = Encoder._sample_latent(encoder_output.squeeze(), 64)
-                        latent_vectors.append(z.cpu().numpy())
-                        program_ids.append(program_id)
-                    except Exception as e:
-                        print(f"Error encoding program {program_id}: {e}")
-                        
-            except Exception as e:
-                print(f"Error processing program {program_id}: {e}")
-                traceback.print_exc()
+                        program_tokens = dsl.str2intseq(program_code)
+                    except:
+                        continue
+                else:
+                    continue
+                    
+            tokens_tensor = torch.LongTensor(program_tokens).unsqueeze(0)
+            src_len = torch.LongTensor([len(program_tokens)])
+            
+            with torch.no_grad():
+                _, encoder_output = program_encoder(tokens_tensor, src_len)
+                z = Encoder._sample_latent(encoder_output.squeeze(), 64)
+                latent_vectors.append(z.cpu().numpy())
+                program_ids.append(program_id)
                 
         return np.array(latent_vectors), program_ids
     
@@ -406,82 +387,39 @@ class Analyzer:
     """Performs analysis and visualization of encoded data."""
     
     @staticmethod
-    def analyze_encodings(behavior_vectors: np.ndarray, program_vectors: np.ndarray) -> Dict[str, Any]:
+    def analyze_encodings(behavior_vectors: np.ndarray, program_vectors: np.ndarray,
+                         behavior_ids: List[str], program_ids: List[str]) -> Dict[str, Any]:
         """Analyze and compare encodings.
         
         Args:
             behavior_vectors: Behavior encoding vectors
             program_vectors: Program encoding vectors
+            behavior_ids: List of behavior program IDs
+            program_ids: List of program IDs
             
         Returns:
             Dictionary containing analysis results
         """
-        # Make sure vectors are properly shaped for comparison
-        original_behavior_shape = behavior_vectors.shape
-        original_program_shape = program_vectors.shape
+        behavior_ids_set = set(behavior_ids)
+        program_ids_set = set(program_ids)
         
-        print(f"Original shapes - behavior: {original_behavior_shape}, program: {original_program_shape}")
+        common_ids = behavior_ids_set.intersection(program_ids_set)
+        behavior_only_ids = behavior_ids_set - program_ids_set
+        program_only_ids = program_ids_set - behavior_ids_set
         
-        # Reshape behavior_vectors if it has more than 2 dimensions
-        if len(behavior_vectors.shape) > 2:
-            behavior_vectors = behavior_vectors.reshape(behavior_vectors.shape[0], -1)
-            print(f"Reshaped behavior vectors to: {behavior_vectors.shape}")
+        # Calculate vector differences
+        behavior_dict = {pid: vec for pid, vec in zip(behavior_ids, behavior_vectors)}
+        program_dict = {pid: vec for pid, vec in zip(program_ids, program_vectors)}
         
-        # Make sure vectors are properly shaped for comparison
-        if behavior_vectors.shape[1] != program_vectors.shape[1]:
-            print(f"Warning: Vector dimensions don't match - behavior: {behavior_vectors.shape}, program: {program_vectors.shape}")
-            
-            # Ensure both arrays have the same shape for element-wise operations
-            # Project both to the same dimensionality if needed
-            if len(behavior_vectors) > 0 and len(program_vectors) > 0:
-                # Simply flatten both vectors for comparison
-                # Instead of trying to reshape them to match each other's specific shape
-                print(f"Flattening vectors for comparison")
-                
-                # Calculate vector differences using flattened vectors
-                differences = []
-                min_len = min(len(behavior_vectors), len(program_vectors))
-                
-                for i in range(min_len):
-                    b_vec = behavior_vectors[i].flatten()
-                    p_vec = program_vectors[i].flatten()
-                    
-                    # If dimensions still don't match, use a dimension-independent distance metric
-                    if len(b_vec) != len(p_vec):
-                        # Normalize by vector length for fair comparison
-                        b_norm = np.linalg.norm(b_vec)
-                        p_norm = np.linalg.norm(p_vec)
-                        if b_norm > 0:
-                            b_vec = b_vec / b_norm
-                        if p_norm > 0:
-                            p_vec = p_vec / p_norm
-                        
-                        # Since we can't directly compare different-sized vectors,
-                        # we'll use the norms as a simple distance
-                        diff = abs(b_norm - p_norm)
-                        differences.append(diff)
-                    else:
-                        # If sizes match after flattening, calculate Euclidean distance
-                        diff = np.linalg.norm(b_vec - p_vec)
-                        differences.append(diff)
-                
-                return {
-                    'differences': np.array(differences)
-                }
-        
-        # Original code for when dimensions match
-        differences = []
-        min_len = min(len(behavior_vectors), len(program_vectors))
-        
-        for i in range(min_len):
-            b_vec = behavior_vectors[i]
-            p_vec = program_vectors[i]
-            
-            # Calculate Euclidean distance
-            diff = np.linalg.norm(b_vec - p_vec)
-            differences.append(diff)
+        differences = [
+            np.linalg.norm(behavior_dict[pid] - program_dict[pid])
+            for pid in common_ids
+        ]
         
         return {
+            'common_ids': list(common_ids),
+            'behavior_only_ids': list(behavior_only_ids),
+            'program_only_ids': list(program_only_ids),
             'differences': np.array(differences)
         }
     
@@ -495,30 +433,6 @@ class Analyzer:
             program_vectors: Program encoding vectors
             analysis_results: Dictionary of analysis results
         """
-        # Ensure vectors have the same dimensions for visualization
-        if behavior_vectors.shape[1] != program_vectors.shape[1]:
-            print(f"Reshaping vectors for visualization: behavior {behavior_vectors.shape}, program {program_vectors.shape}")
-            min_dim = min(behavior_vectors.shape[1], program_vectors.shape[1])
-            
-            # Use PCA to reduce dimensions if needed
-            if behavior_vectors.shape[1] > min_dim:
-                from sklearn.decomposition import PCA
-                pca = PCA(n_components=min_dim)
-                behavior_vectors = pca.fit_transform(behavior_vectors)
-                print(f"Projected behavior vectors to: {behavior_vectors.shape}")
-                
-            if program_vectors.shape[1] > min_dim:
-                from sklearn.decomposition import PCA
-                pca = PCA(n_components=min_dim)
-                program_vectors = pca.fit_transform(program_vectors)
-                print(f"Projected program vectors to: {program_vectors.shape}")
-            
-        # Flatten vectors to ensure proper shape for analysis
-        flat_behavior_vectors = behavior_vectors.reshape(behavior_vectors.shape[0], -1)
-        flat_program_vectors = program_vectors.reshape(program_vectors.shape[0], -1)
-        
-        print(f"Final shapes for visualization - behavior: {flat_behavior_vectors.shape}, program: {flat_program_vectors.shape}")
-        
         # Plot vector distance histogram
         plt.figure(figsize=(12, 6))
         plt.hist(analysis_results['differences'], bins=50, alpha=0.7, color='blue')
@@ -530,8 +444,8 @@ class Analyzer:
         plt.close()
         
         # Plot vector norms comparison
-        behavior_norms = np.array([np.linalg.norm(vec) for vec in flat_behavior_vectors])
-        program_norms = np.array([np.linalg.norm(vec) for vec in flat_program_vectors])
+        behavior_norms = np.array([np.linalg.norm(vec) for vec in behavior_vectors])
+        program_norms = np.array([np.linalg.norm(vec) for vec in program_vectors])
         
         plt.figure(figsize=(12, 6))
         plt.scatter(behavior_norms, program_norms, alpha=0.5)
@@ -546,28 +460,23 @@ class Analyzer:
         plt.savefig('vector_norms_comparison.png', dpi=300)
         plt.close()
         
-        # Perform separate PCAs and plot results
-        # Since we can't directly combine vectors of different dimensions
-        from sklearn.decomposition import PCA
+        # Perform PCA and plot results
+        flat_behavior_vectors = behavior_vectors.reshape(behavior_vectors.shape[0], -1)
+        flat_program_vectors = program_vectors.reshape(program_vectors.shape[0], -1)
         
-        # PCA for behavior vectors
-        behavior_pca = PCA(n_components=2)
-        behavior_pca_result = behavior_pca.fit_transform(flat_behavior_vectors)
+        combined_data = np.vstack([flat_behavior_vectors, flat_program_vectors])
+        pca = PCA(n_components=2)
+        combined_pca = pca.fit_transform(combined_data)
         
-        # PCA for program vectors
-        program_pca = PCA(n_components=2)
-        program_pca_result = program_pca.fit_transform(flat_program_vectors)
+        behavior_pca = combined_pca[:len(flat_behavior_vectors)]
+        program_pca = combined_pca[len(flat_behavior_vectors):]
         
-        # Calculate average explained variance
-        avg_explained_variance = (behavior_pca.explained_variance_ratio_ + program_pca.explained_variance_ratio_) / 2
-        
-        # Plot PCA results
         plt.figure(figsize=(12, 10))
-        plt.scatter(behavior_pca_result[:, 0], behavior_pca_result[:, 1], alpha=0.8, label='Behavior Encodings', color='blue')
-        plt.scatter(program_pca_result[:, 0], program_pca_result[:, 1], alpha=0.8, label='Program Encodings', color='lightgreen')
-        plt.title('Latent Space Encodings in 2D PCA Space (Separate PCAs)')
-        plt.xlabel(f'PC1 ({avg_explained_variance[0]:.2%} avg variance)')
-        plt.ylabel(f'PC2 ({avg_explained_variance[1]:.2%} avg variance)')
+        plt.scatter(behavior_pca[:, 0], behavior_pca[:, 1], alpha=0.8, label='Behavior Encodings', color='blue')
+        plt.scatter(program_pca[:, 0], program_pca[:, 1], alpha=0.8, label='Program Encodings', color='lightgreen')
+        plt.title('Latent Space Encodings in 2D PCA Space')
+        plt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%} variance)')
+        plt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%} variance)')
         plt.legend()
         plt.grid(alpha=0.3)
         plt.tight_layout()
@@ -577,11 +486,10 @@ class Analyzer:
         # Save results
         results = {
             'behavior_vectors': flat_behavior_vectors,
-            'behavior_pca': behavior_pca_result,
+            'behavior_pca': behavior_pca,
             'program_vectors': flat_program_vectors,
-            'program_pca': program_pca_result,
-            'behavior_pca_explained_variance': behavior_pca.explained_variance_ratio_,
-            'program_pca_explained_variance': program_pca.explained_variance_ratio_,
+            'program_pca': program_pca,
+            'pca_explained_variance_ratio': pca.explained_variance_ratio_,
             **analysis_results,
             'behavior_norms': behavior_norms,
             'program_norms': program_norms
@@ -605,18 +513,20 @@ def main():
         programs = data_processor.process_hdf5_file(hdf5_file_path, behavior_encoder)
         
         # Encode behaviors
-        behavior_vectors, _ = Encoder.encode_demos(programs, behavior_encoder)
+        behavior_vectors, behavior_ids = Encoder.encode_demos(programs, behavior_encoder)
         
         # Process text file
         txt_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/id.txt"
         program_data = data_processor.load_programs_from_txt(txt_file_path)
         
         # Encode programs
-        program_vectors, _ = Encoder.encode_programs(program_data, program_encoder, dsl)
+        program_vectors, program_ids = Encoder.encode_programs(program_data, program_encoder, dsl)
         
         # Analyze and visualize results
         if len(behavior_vectors) > 0 and len(program_vectors) > 0:
-            analysis_results = Analyzer.analyze_encodings(behavior_vectors, program_vectors)
+            analysis_results = Analyzer.analyze_encodings(
+                behavior_vectors, program_vectors, behavior_ids, program_ids
+            )
             Analyzer.visualize_results(behavior_vectors, program_vectors, analysis_results)
             
             # Print analysis summary
