@@ -8,9 +8,6 @@ This module provides functionality to:
 4. Encode program behaviors and source code
 5. Perform PCA analysis and visualization
 6. Compare and analyze the encodings
-
-Author: Vincent Chang
-Date: 2024
 """
 
 import torch
@@ -167,89 +164,32 @@ class DataProcessor:
             traceback.print_exc()
             return []
     
-    def _get_exec_data(self, hdf5_file, program_id: str, num_agent_actions: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Get execution data for a program.
-        
-        Args:
-            hdf5_file: HDF5 file object
-            program_id: Program ID
-            num_agent_actions: Number of possible agent actions
+    def _get_exec_data(self, hdf5_file, program_id: str, num_agent_actions: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Extract execution data from HDF5 file for a given program."""
+        if program_id not in hdf5_file or 's_h' not in hdf5_file[program_id]:
+            return np.array([]), np.array([]), np.array([])
             
-        Returns:
-            Tuple of (state_history, state_lengths, action_history, action_lengths)
-        """
-        if program_id not in hdf5_file:
-            raise ValueError(f"Program {program_id} not found in HDF5 file")
+        s_h = np.moveaxis(np.copy(hdf5_file[program_id]['s_h']), [-1,-2,-3], [-3,-1,-2])
+        a_h = np.copy(hdf5_file[program_id]['a_h'])
+        s_h_len = np.copy(hdf5_file[program_id]['s_h_len'])
+        a_h_len = np.copy(hdf5_file[program_id]['a_h_len'])
         
-        if 's_h' not in hdf5_file[program_id]:
-            raise ValueError(f"No state history found for program {program_id}")
-        
-        # Get state history and reshape to (num_demos, T, C, H, W)
-        s_h = hdf5_file[program_id]['s_h'][:]  # (C, num_demos, T, H, W)
-        s_h = np.moveaxis(s_h, [0, 1, 2], [2, 0, 1])  # (num_demos, T, C, H, W)
-        
-        # Get action history and reshape to (num_demos, T)
-        a_h = hdf5_file[program_id]['a_h'][:]  # (T, num_demos)
-        a_h = np.moveaxis(a_h, [0, 1], [1, 0])  # (num_demos, T)
-        
-        # Get sequence lengths
-        s_h_len = hdf5_file[program_id]['s_h_len'][:]  # (num_demos,)
-        a_h_len = hdf5_file[program_id]['a_h_len'][:]  # (num_demos,)
-        
-        # Ensure at least 2 timesteps for each demo
-        for i in range(len(s_h)):
-            if s_h_len[i] == 1:
-                # For single timestep demos, duplicate the state
-                # First get the single state
-                single_state = s_h[i, 0:1]  # Keep the channel dimension
-                # Create a new array with the correct shape
-                new_state = np.zeros((2, s_h.shape[2], s_h.shape[3], s_h.shape[4]), dtype=s_h.dtype)
-                # Copy the single state to both positions
-                new_state[0] = single_state[0]
-                new_state[1] = single_state[0]
-                # Create a new array for the entire demo sequence
-                new_demo = np.zeros((s_h.shape[1], s_h.shape[2], s_h.shape[3], s_h.shape[4]), dtype=s_h.dtype)
-                # Copy the new state sequence into the first two positions
-                new_demo[:2] = new_state
-                # Assign the new demo sequence
-                s_h[i] = new_demo
-                s_h_len[i] = 2
-                
-                # Create new action array with correct shape
-                new_actions = np.zeros((2,), dtype=a_h.dtype)
-                a_h[i] = new_actions
-                a_h_len[i] = 2
-        
-        # Handle empty action sequences
-        for i in range(len(a_h)):
+        if s_h.shape[1] == 1:
+            s_h = np.concatenate((np.copy(s_h), np.copy(s_h)), axis=1)
+            a_h = np.ones((s_h.shape[0], 1))
+            
+        for i in range(s_h_len.shape[0]):
             if a_h_len[i] == 0:
-                # Create a new array with the correct shape for dummy actions
-                new_actions = np.zeros((2,), dtype=a_h.dtype)
-                # Assign the new actions array
-                a_h[i] = new_actions
-                a_h_len[i] = 2
+                assert s_h_len[i] == 1
+                a_h_len[i] += 1
+                s_h_len[i] += 1
+                s_h[i][1] = s_h[i][0]
+                a_h[i][0] = num_agent_actions - 1
                 
-                # Ensure state sequence matches
-                if s_h_len[i] == 1:
-                    single_state = s_h[i, 0:1]
-                    new_state = np.zeros((2, s_h.shape[2], s_h.shape[3], s_h.shape[4]), dtype=s_h.dtype)
-                    new_state[0] = single_state[0]
-                    new_state[1] = single_state[0]
-                    # Create a new array for the entire demo sequence
-                    new_demo = np.zeros((s_h.shape[1], s_h.shape[2], s_h.shape[3], s_h.shape[4]), dtype=s_h.dtype)
-                    # Copy the new state sequence into the first two positions
-                    new_demo[:2] = new_state
-                    # Assign the new demo sequence
-                    s_h[i] = new_demo
-                    s_h_len[i] = 2
-        
-        # Print shapes for debugging
-        print(f"\nProgram {program_id} data shapes:")
-        print(f"s_h: {s_h.shape}")
-        print(f"s_h_len: {s_h_len.shape}")
-        print(f"a_h: {a_h.shape}")
-        print(f"a_h_len: {a_h_len.shape}")
-        
+        # results = map(lambda x: np.expand_dims(x[0][0], 0), zip(s_h, s_h_len))
+        # s_h = np.stack(list(results))
+        # print(f"s_h.shape: {s_h.shape}, s_h_len.shape: {s_h_len.shape}, a_h.shape: {a_h.shape}, a_h_len.shape: {a_h_len.shape}\n")
+
         return s_h, s_h_len, a_h, a_h_len
     
     def load_programs_from_txt(self, file_path: str) -> List[Tuple[str, Optional[str]]]:
@@ -297,26 +237,30 @@ class Encoder:
             try:
                 # Convert to torch tensors
                 s_h_tensor = torch.tensor(s_h, dtype=torch.float32)  # (num_demos, T, C, H, W)
-                s_h_len_tensor = torch.tensor(s_h_len, dtype=torch.int16)  # (num_demos,)
+                s_h_len_tensor = torch.tensor(s_h_len, dtype=torch.int16)  # (num_demos)
                 a_h_tensor = torch.tensor(a_h, dtype=torch.int16)   # (num_demos, T)
-                a_h_len_tensor = torch.tensor(a_h_len, dtype=torch.int16)  # (num_demos,)
+                a_h_len_tensor = torch.tensor(a_h_len, dtype=torch.int16)  # (num_demos)
                 
-                # Add rollout dimension (R=1)
-                s_h_tensor = s_h_tensor.unsqueeze(1)  # (num_demos, 1, T, C, H, W)
-                a_h_tensor = a_h_tensor.unsqueeze(1)  # (num_demos, 1, T)
+                # print(f"s_h_tensor.shape: {s_h_tensor.shape}, s_h_len_tensor.shape: {s_h_len_tensor.shape}, a_h_tensor.shape: {a_h_tensor.shape}, a_h_len_tensor.shape: {a_h_len_tensor.shape}\n")
+
+                # BehaviorEncoder expects: 
+                # s_h: shape (B, R, T, C, H, W) - B=batch_size, R=num_demos_per_program
+                # a_h: shape (B, R, T)
+                # s_h_len: shape (B, R)
+                # a_h_len: shape (B, R)
                 
-                # Print shapes for debugging
-                print(f"\nEncoding program {program_id}:")
-                print(f"Input shapes:")
-                print(f"s_h_tensor: {s_h_tensor.shape}")
-                print(f"a_h_tensor: {a_h_tensor.shape}")
-                print(f"s_h_len_tensor: {s_h_len_tensor.shape}")
-                print(f"a_h_len_tensor: {a_h_len_tensor.shape}")
+                # Add batch dimension (B=1)
+                s_h_batch = s_h_tensor.unsqueeze(0)  # (1, num_demos, T, C, H, W)
+                a_h_batch = a_h_tensor.unsqueeze(0)  # (1, num_demos, T)
+                s_h_len_batch = s_h_len_tensor.unsqueeze(0)  # (1, num_demos)
+                a_h_len_batch = a_h_len_tensor.unsqueeze(0)  # (1, num_demos)
+                
+                # print(f"s_h_batch.shape: {s_h_batch.shape}, s_h_len_batch.shape: {s_h_len_batch.shape}, a_h_batch.shape: {a_h_batch.shape}, a_h_len_batch.shape: {a_h_len_batch.shape}\n")
                 
                 with torch.no_grad():
                     # Forward pass through behavior encoder
-                    latent = behavior_encoder(s_h_tensor, a_h_tensor, s_h_len_tensor, a_h_len_tensor)
-                    print(f"Output latent shape: {latent.shape}")
+                    latent = behavior_encoder(s_h_batch, a_h_batch, s_h_len_batch, a_h_len_batch)
+                    # latent shape: (1, out_dim)
                     latent_vectors.append(latent.cpu().numpy())
                     program_ids.append(program_id)
                     
@@ -509,14 +453,16 @@ def main():
         behavior_encoder, program_encoder = encoder_manager.load_encoders()
         
         # Process HDF5 file
-        hdf5_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/data.hdf5"
+        # hdf5_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/data.hdf5"
+        hdf5_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/data_820000.hdf5"
         programs = data_processor.process_hdf5_file(hdf5_file_path, behavior_encoder)
         
         # Encode behaviors
         behavior_vectors, behavior_ids = Encoder.encode_demos(programs, behavior_encoder)
         
         # Process text file
-        txt_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/id.txt"
+        # txt_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/id.txt"
+        txt_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/id_820000.txt"
         program_data = data_processor.load_programs_from_txt(txt_file_path)
         
         # Encode programs

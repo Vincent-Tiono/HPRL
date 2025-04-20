@@ -453,14 +453,16 @@ def main():
         behavior_encoder, program_encoder = encoder_manager.load_encoders()
         
         # Process HDF5 file
-        hdf5_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/data.hdf5"
+        # hdf5_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/data.hdf5"
+        hdf5_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/data_820000.hdf5"
         programs = data_processor.process_hdf5_file(hdf5_file_path, behavior_encoder)
         
         # Encode behaviors
         behavior_vectors, behavior_ids = Encoder.encode_demos(programs, behavior_encoder)
         
         # Process text file
-        txt_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/id.txt"
+        # txt_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/id.txt"
+        txt_file_path = "/tmp2/hubertchang/datasets_options_L30_1m_cover_branch/karel_dataset_option_L30_1m_cover_branch/id_820000.txt"
         program_data = data_processor.load_programs_from_txt(txt_file_path)
         
         # Encode programs
