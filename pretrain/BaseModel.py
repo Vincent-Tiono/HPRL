@@ -104,13 +104,14 @@ class BaseModel(object):
         epoch_info = {}
         optinal_epoch_info = {}
         num_batches = len(data_loader)
+        self.current_epoch = epoch
 
         batch_info_list = defaultdict(list)
         batch_gt_programs, batch_z_pred_programs, batch_b_z_pred_programs, batch_gen_programs = [], [], [], []
         batch_program_ids, batch_latent_programs = [], []
         for batch_idx, batch in enumerate(data_loader):
 
-            batch_info = self._run_batch(batch, mode)
+            batch_info = self._run_batch(batch, mode, batch_idx=batch_idx, data_loader=data_loader)
 
             # log losses and accuracies
             for key, val in batch_info.items():
@@ -205,9 +206,9 @@ class BaseModel(object):
                 self.save_net(
                     os.path.abspath(os.path.join(self.config['outdir'], 'best_valid_params.ptp'.format(epoch))))
 
-            if np.isnan(record_dict_eval['mean_total_loss']):
-                self.logger.debug(self.verbose, 'Early Stopping because validation loss is nan')
-                return best_valid_epoch, best_valid_loss, True
+            # if np.isnan(record_dict_eval['mean_total_loss']):
+            #     self.logger.debug(self.verbose, 'Early Stopping because validation loss is nan')
+            #     return best_valid_epoch, best_valid_loss, True
 
         # Perform LR scheduler step
         self.step_lr_scheduler()

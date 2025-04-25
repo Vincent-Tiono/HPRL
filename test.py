@@ -44,8 +44,7 @@ class SupervisedModel(BaseModel):
         
         # Separate counters for train and eval
         self.train_step = 0
-        self.current_epoch = 0
-        self.eval_epochs = []  # Track at which epochs we do evaluation
+        self.eval_step = 0
         
         print("SupervisedModel: self.net.vae.decoder.setup: ", self.net.vae.decoder.setup)
         # debug code
@@ -204,9 +203,9 @@ class SupervisedModel(BaseModel):
         return (greedy_t_accuracy, greedy_p_accuracy, greedy_a_accuracy, greedy_d_accuracy), generated_programs, logits
 
 
-    def _run_batch(self, batch, mode='train', batch_idx=None, data_loader=None):
-        """ training on one batch 
-        
+    def _run_batch(self, batch, mode='train'):
+        """ training on one batch
+
         :param batch: list of 6 elements:
                       programs(long): ground truth programs: B x max_program_len
                       ids(str): program ids
@@ -214,9 +213,8 @@ class SupervisedModel(BaseModel):
                       s_h(bool): B x num_demo_per_program x max_demo_length(currently 1) x C x W x H
                       a_h(int16): B x num_demo_per_program x max_demo_length
                       a_h_len(int16): B x num_demo_per_program
+
         :param mode(str): execution mode, train or eval
-        :param batch_idx: current batch index in the epoch
-        :param data_loader: the dataloader being used
         :return (dict): batch_info containing accuracy, loss and predicitons
         """
 
@@ -227,8 +225,6 @@ class SupervisedModel(BaseModel):
         elif mode == 'eval':
             self.net.eval()
             torch.set_grad_enabled(False)
-            if self.current_epoch not in self.eval_epochs:
-                self.eval_epochs.append(self.current_epoch)
 
         programs, ids, trg_mask, s_h, s_h_len, a_h, a_h_len = batch
 
@@ -371,85 +367,64 @@ class SupervisedModel(BaseModel):
             'decoder_time': decoder_time}
 
         if mode in ("train", "eval"):
-            # Use train_step as the global counter
+            # Use separate step counters for train and eval modes
             if mode == "train":
                 self.train_step += 1
-                wandb.log({
-                    'train/loss/total': loss.item(),
-                    'train/loss/z_rec': z_rec_loss.item(),
-                    'train/loss/b_z_rec': b_z_rec_loss.item(),
-                    'train/loss/lat': lat_loss.item(),
-                    'train/loss/z_condition': z_condition_loss.item(),
-                    'train/loss/b_z_condition': b_z_condition_loss.item(),
-                    'train/loss/clip': clip_loss.item(),
-                    'train/loss/clip_accuracy': clip_acc.item(),
-                    'train/loss/contrastive': contrastive_loss.item(),
-
-                    'train/z_vs_b/decoder_token_accuracy': {
-                        'z': z_t_accuracy.item(),
-                        'b_z': b_z_t_accuracy.item()
-                    },
-                    'train/z_vs_b/decoder_program_accuracy': {
-                        'z': z_p_accuracy.item(),
-                        'b_z': b_z_p_accuracy.item()
-                    },
-                    'train/z_vs_b/condition_action_accuracy': {
-                        'z': z_cond_t_accuracy.item(),
-                        'b_z': b_z_cond_t_accuracy.item()
-                    },
-                    'train/z_vs_b/condition_demo_accuracy': {
-                        'z': z_cond_p_accuracy.item(),
-                        'b_z': b_z_cond_p_accuracy.item()
-                    }
-                }, step=self.train_step)
+                step_to_use = self.train_step
             else:  # eval
-                # Only log eval metrics at the end of each epoch's evaluation
-                if batch_idx == len(data_loader) - 1:  # Last batch of evaluation
-                    wandb.log({
-                        'eval/loss/total': loss.item(),
-                        'eval/loss/z_rec': z_rec_loss.item(),
-                        'eval/loss/b_z_rec': b_z_rec_loss.item(),
-                        'eval/loss/lat': lat_loss.item(),
-                        'eval/loss/z_condition': z_condition_loss.item(),
-                        'eval/loss/b_z_condition': b_z_condition_loss.item(),
-                        'eval/loss/clip': clip_loss.item(),
-                        'eval/loss/clip_accuracy': clip_acc.item(),
-                        'eval/loss/contrastive': contrastive_loss.item(),
+                self.eval_step += 1
+                step_to_use = self.eval_step
+                
+            wandb.log({
+                f'{mode}/loss/total': loss.item(),
+                f'{mode}/loss/z_rec': z_rec_loss.item(),
+                f'{mode}/loss/b_z_rec': b_z_rec_loss.item(),
+                f'{mode}/loss/lat': lat_loss.item(),
+                f'{mode}/loss/z_condition': z_condition_loss.item(),
+                f'{mode}/loss/b_z_condition': b_z_condition_loss.item(),
+                f'{mode}/loss/clip': clip_loss.item(),
+                f'{mode}/loss/clip_accuracy': clip_acc.item(),
+                f'{mode}/loss/contrastive': contrastive_loss.item(),
 
-                        'eval/z_vs_b/decoder_token_accuracy': {
-                            'z': z_t_accuracy.item(),
-                            'b_z': b_z_t_accuracy.item()
-                        },
-                        'eval/z_vs_b/decoder_program_accuracy': {
-                            'z': z_p_accuracy.item(),
-                            'b_z': b_z_p_accuracy.item()
-                        },
-                        'eval/z_vs_b/condition_action_accuracy': {
-                            'z': z_cond_t_accuracy.item(),
-                            'b_z': b_z_cond_t_accuracy.item()
-                        },
-                        'eval/z_vs_b/condition_demo_accuracy': {
-                            'z': z_cond_p_accuracy.item(),
-                            'b_z': b_z_cond_p_accuracy.item()
-                        },
-                        # Add greedy metrics for eval mode
-                        'eval/z_vs_b/decoder_greedy_token_accuracy': {
-                            'z': z_greedy_t_accuracy.item(),
-                            'b_z': b_z_greedy_t_accuracy.item()
-                        },
-                        'eval/z_vs_b/decoder_greedy_program_accuracy': {
-                            'z': z_greedy_p_accuracy.item(),
-                            'b_z': b_z_greedy_p_accuracy.item()
-                        },
-                        'eval/z_vs_b/condition_greedy_action_accuracy': {
-                            'z': z_greedy_a_accuracy.item(),
-                            'b_z': b_z_greedy_a_accuracy.item()
-                        },
-                        'eval/z_vs_b/condition_greedy_demo_accuracy': {
-                            'z': z_greedy_d_accuracy.item(),
-                            'b_z': b_z_greedy_d_accuracy.item()
-                        }
-                    }, step=self.train_step)
+                f'{mode}/z_vs_b/decoder_token_accuracy': {
+                    'z': z_t_accuracy.item(),
+                    'b_z': b_z_t_accuracy.item()
+                },
+                f'{mode}/z_vs_b/decoder_program_accuracy': {
+                    'z': z_p_accuracy.item(),
+                    'b_z': b_z_p_accuracy.item()
+                },
+                f'{mode}/z_vs_b/condition_action_accuracy': {
+                    'z': z_cond_t_accuracy.item(),
+                    'b_z': b_z_cond_t_accuracy.item()
+                },
+                f'{mode}/z_vs_b/condition_demo_accuracy': {
+                    'z': z_cond_p_accuracy.item(),
+                    'b_z': b_z_cond_p_accuracy.item()
+                },
+                f'{mode}_step': step_to_use
+            }, step=step_to_use)
+            
+        if mode == "eval":
+            wandb.log({
+                f'{mode}/z_vs_b/decoder_greedy_token_accuracy': {
+                    'z': z_greedy_t_accuracy.item(),
+                    'b_z': b_z_greedy_t_accuracy.item()
+                },
+                f'{mode}/z_vs_b/decoder_greedy_program_accuracy': {
+                    'z': z_greedy_p_accuracy.item(),
+                    'b_z': b_z_greedy_p_accuracy.item()
+                },
+                f'{mode}/z_vs_b/condition_greedy_action_accuracy': {
+                    'z': z_greedy_a_accuracy.item(),
+                    'b_z': b_z_greedy_a_accuracy.item()
+                },
+                f'{mode}/z_vs_b/condition_greedy_demo_accuracy': {
+                    'z': z_greedy_d_accuracy.item(),
+                    'b_z': b_z_greedy_d_accuracy.item()
+                },
+                f'eval_step': self.eval_step
+            }, step=self.eval_step)
 
 
 
