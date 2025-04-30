@@ -11,3 +11,5 @@ karel_dataset/
 *.zip
 *.png
 *.npy
+pretrain/action_fuse_all_new/
+pretrain/action_fuse_all_dataset_clip/
