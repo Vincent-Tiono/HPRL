@@ -170,6 +170,7 @@ class SupervisedModel(BaseModel):
 
         return condition_loss, cond_t_accuracy, cond_p_accuracy
 
+    '''EVAL'''
     def _greedy_rollout(self, batch, z, targets, trg_mask, mode):
         # autoregressive action predictions of decoder and condition policy
         programs, _, _, s_h, s_h_len, a_h, a_h_len = batch
@@ -206,7 +207,7 @@ class SupervisedModel(BaseModel):
 
         return (greedy_t_accuracy, greedy_p_accuracy, greedy_a_accuracy, greedy_d_accuracy), z_generated_programs_str, logits
 
-
+    '''TRAIN'''
     def _run_batch(self, batch, mode='train'):
         """ training on one batch
 
@@ -393,6 +394,7 @@ class SupervisedModel(BaseModel):
             self.global_train_step += 1
             
         """ calculate accuracy """
+        '''EVAL'''
         with torch.no_grad():
             batch_shape = z_output_logits.shape[:-1]
             z_t_accuracy, z_p_accuracy = calculate_accuracy(z_logits, targets, vae_mask, batch_shape)

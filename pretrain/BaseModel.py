@@ -305,6 +305,8 @@ class BaseModel(object):
 
         return best_valid_epoch, best_valid_loss, record_dict_eval, False
 
+
+    '''TRAIN'''
     def train(self,  train_dataloader, val_dataloader, *args, **kwargs):
         tr_loader = train_dataloader
         val_loader = val_dataloader
@@ -323,6 +325,9 @@ class BaseModel(object):
             assert not done, 'found NaN in parameters'
 
         return None
+    
+    
+    '''EVAL'''
 
     def evaluate(self, data_loader, epoch=0, *args, **kwargs):
         t = time.time()

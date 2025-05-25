@@ -329,6 +329,7 @@ def run(config, logger):
 
     # start training
     if config['algorithm'] == 'supervised':
+        '''TRAIN'''
         if config['mode'] == 'train':
             tic = time.time()
             model.train(p_train_dataloader, p_val_dataloader, r_train_dataloader, r_val_dataloader,
@@ -340,6 +341,8 @@ def run(config, logger):
             logs_path = os.path.join(config['outdir'], config['record_file'])
             pickle.dump(global_logs, file=open(logs_path, 'wb'))
 
+
+        '''EVAL'''
         elif config['mode'] == 'eval':
             assert config_eval['usage'] in ['train', 'valid', 'test'], 'usage should be one of [train, valid, test]'
             if config_eval['usage'] == 'train':
