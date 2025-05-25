@@ -39,8 +39,8 @@ config = {
         'num_rnn_decoder_units': 256,
         'use_transformer_encoder': False,
         'use_transformer_decoder': False,
-        'use_transformer_encoder_behavior': True,   # use transformer for behavior encoding instead of RNN
-        'use_transformer_decoder_behavior': True,   # use transformer for behavior encoding instead of RNN
+        'use_transformer_encoder_behavior': False,   # use transformer for behavior encoding instead of RNN
+        'use_transformer_decoder_behavior': False,   # use transformer for behavior encoding instead of RNN
         'transformer_layers': 4,                    # number of transformer layers for behavior encoder
         'transformer_heads': 4,                     # number of attention heads for behavior encoder
         'transformer': {                            # transformer unit setting
