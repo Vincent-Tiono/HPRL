@@ -128,14 +128,14 @@ class BaseModel(object):
         self.logger.debug('Learning rate: ' + ', '.join(map(str, lrs)))
 
 
-    def _add_program_latent_vectors(self, optional_record_dict, optional_record_dict_eval, type='best'):
-        self.global_logs['info']['logs']['validation'][type + '_program_latent_vectors'] = optional_record_dict_eval[
-            'program_latent_vectors']
-        self.global_logs['info']['logs']['validation'][type + '_program_ids'] = optional_record_dict_eval['program_ids']
+    # def _add_program_latent_vectors(self, optional_record_dict, optional_record_dict_eval, type='best'):
+    #     self.global_logs['info']['logs']['validation'][type + '_program_latent_vectors'] = optional_record_dict_eval[
+    #         'program_latent_vectors']
+    #     self.global_logs['info']['logs']['validation'][type + '_program_ids'] = optional_record_dict_eval['program_ids']
 
-        self.global_logs['info']['logs']['train'][type + '_program_latent_vectors'] = optional_record_dict[
-            'program_latent_vectors']
-        self.global_logs['info']['logs']['train'][type+'_program_ids'] = optional_record_dict['program_ids']
+    #     self.global_logs['info']['logs']['train'][type + '_program_latent_vectors'] = optional_record_dict[
+    #         'program_latent_vectors']
+    #     self.global_logs['info']['logs']['train'][type+'_program_ids'] = optional_record_dict['program_ids']
 
     def _run_epoch(self, data_loader, mode, epoch, *args, **kwargs):
         epoch_info = {}
@@ -179,10 +179,10 @@ class BaseModel(object):
 
             # log programs
             batch_gt_programs.append(batch_info['gt_programs'])
-            batch_z_pred_programs.append(batch_info['z_pred_programs'])
+            # batch_z_pred_programs.append(batch_info['z_pred_programs'])
             batch_b_z_pred_programs.append(batch_info['b_z_pred_programs'])
             batch_program_ids.append(batch_info['program_ids'])
-            batch_latent_programs.append(batch_info['latent_vectors'])
+            # batch_latent_programs.append(batch_info['latent_vectors'])
             batch_latent_behaviors.append(batch_info['behavior_vectors'])
 
             self.logger.debug("epoch:{} batch:{}/{} current batch loss: {}".format(epoch, batch_idx, num_batches,
@@ -191,11 +191,11 @@ class BaseModel(object):
                 for i in range(min(batch_info['gt_programs'].shape[0], 5)):
                     self.writer.add_text('dataset/epoch_{}'.format(epoch),
                                          'gt: {} pred: {}'.format(self.dsl.intseq2str(batch_info['gt_programs'][i]),
-                                                                  self.dsl.intseq2str(batch_info['z_pred_programs'][i])),
+                                                                  self.dsl.intseq2str(batch_info['b_z_pred_programs'][i])),
                                          epoch * num_batches)
 
-                batch_gen_programs.append(batch_info['z_generated_programs'])
-                for i, program in enumerate(batch_info['z_generated_programs']):
+                batch_gen_programs.append(batch_info['b_z_generated_programs'])
+                for i, program in enumerate(batch_info['b_z_generated_programs']):
                     self.writer.add_text('generated/epoch_{}'.format(epoch), program, epoch * num_batches)
         
         # Log the averaged evaluation metrics at the end of evaluation
@@ -217,24 +217,24 @@ class BaseModel(object):
             program_txt_path = os.path.join(self.gen_program_dir, f'decoded_vs_gt_{epoch}.txt')
             with open(program_txt_path, 'a') as f:
                 for i in range(len(batch_info['gt_programs'])):
-                    z = torch.tensor(batch_info['latent_vectors'][i])
+                    # z = torch.tensor(batch_info['latent_vectors'][i])
                     bz = torch.tensor(batch_info['behavior_vectors'][i])
                     gt_str = self.dsl.intseq2str(batch_info['gt_programs'][i])
-                    z_pred_str = batch_info['z_generated_programs'][i]
+                    # z_pred_str = batch_info['z_generated_programs'][i]
                     b_z_pred_str = batch_info['b_z_generated_programs'][i]
                     f.write(f"truth : {gt_str}\n")
-                    f.write(f"z_pred: {z_pred_str}\n")
+                    # f.write(f"z_pred: {z_pred_str}\n")
                     f.write(f"bz_pre: {b_z_pred_str}\n")
-                    f.write(f"cosine similarity: {torch.nn.functional.cosine_similarity(z, bz, dim=0).item()}\n")
-                    f.write(f"mse: {torch.nn.functional.mse_loss(z, bz).item()}\n")
-                    f.write(f"norm_ratio: {torch.norm(z)/torch.norm(bz)}\n\n")
+                    # f.write(f"cosine similarity: {torch.nn.functional.cosine_similarity(z, bz, dim=0).item()}\n")
+                    # f.write(f"mse: {torch.nn.functional.mse_loss(z, bz).item()}\n")
+                    # f.write(f"norm_ratio: {torch.norm(z)/torch.norm(bz)}\n\n")
             wandb.save(program_txt_path)
             # Clear the metrics for next evaluation
             self.eval_metrics.clear()
 
         epoch_info['generated_programs'] = batch_gen_programs
         optinal_epoch_info['program_ids'] = batch_program_ids
-        optinal_epoch_info['program_latent_vectors'] = batch_latent_programs
+        # optinal_epoch_info['program_latent_vectors'] = batch_latent_programs
         optinal_epoch_info['behavior_latent_vectors'] = batch_latent_behaviors
         for key, val in batch_info_list.items():
             if ('loss' in key or 'accuracy' in key):
@@ -314,7 +314,7 @@ class BaseModel(object):
             if record_dict_eval['mean_total_loss'] < best_valid_loss:
                 best_valid_epoch = epoch
                 best_valid_loss = record_dict_eval['mean_total_loss']
-                self._add_program_latent_vectors(optional_record_dict, optional_record_dict_eval, type='best')
+                # self._add_program_latent_vectors(optional_record_dict, optional_record_dict_eval, type='best')
                 try:
                     self.save_checkpoint(
                         os.path.abspath(os.path.join(self.config['outdir'], 'best_valid_params.ptp'.format(epoch))))
@@ -332,7 +332,7 @@ class BaseModel(object):
         self.step_lr_scheduler()
 
         # Save net
-        self._add_program_latent_vectors(optional_record_dict, optional_record_dict_eval, type='final')
+        # self._add_program_latent_vectors(optional_record_dict, optional_record_dict_eval, type='final')
         try:
             self.save_checkpoint(os.path.join(self.config['outdir'], 'final_params.ptp'))
             self.logger.info(f"saved checkpoints to {os.path.join(self.config['outdir'], 'final_params.ptp')}")

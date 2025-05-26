@@ -345,8 +345,8 @@ class SupervisedModel(BaseModel):
         if not self.program_frozen and not self.start_decoder_finetune:
             # if cfg_losses.get('z_rec', False):
             #     loss += z_rec_loss
-            # if cfg_losses.get('b_z_rec', False):
-            #     loss += b_z_rec_loss
+            if cfg_losses.get('b_z_rec', False):
+                loss += b_z_rec_loss
             # if 'clip' in cfg_losses.get('contrastive_loss', []):
             #     loss += clip_loss
             # if 'hinge' in cfg_losses.get('contrastive_loss', []):

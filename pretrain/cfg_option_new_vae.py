@@ -362,7 +362,7 @@ config = {
     'final_reward_scale': False,
 
     'behavior_representation': 'action_sequence',    # 'state_sequence', 'action_sequence'
-    'encode_method': 'concat_sasa',                        #'prepend_s0', 'fuse_s0', 'sasa', 'concat_sasa'                    
+    'encode_method': 'fuse_s0',                        #'prepend_s0', 'fuse_s0', 'sasa', 'concat_sasa'                    
     'loss': {
         'z_latent_loss_coef': 1.0,                    # coefficient of latent loss (beta) in VAE during SL training
         'bz_latent_loss_coef': 1.0,                   # coefficient of bz latent loss (beta) in VAE during SL training
