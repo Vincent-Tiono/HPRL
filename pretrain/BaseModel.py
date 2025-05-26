@@ -374,7 +374,7 @@ class BaseModel(object):
         epoch_records, optinal_epoch_records = self._run_epoch(data_loader, 'eval', epoch, *args, **kwargs)
         epoch_z = optinal_epoch_records['program_latent_vectors']
         epoch_bz = optinal_epoch_records['behavior_latent_vectors']
-        analyze_z_bz(epoch_z, epoch_bz)
+        # analyze_z_bz(epoch_z, epoch_bz)
         # Log and print epoch records
         log_record_dict('eval', epoch_records, self.global_logs)
         self._print_record_dict(epoch_records, 'Eval', time.time() - t)

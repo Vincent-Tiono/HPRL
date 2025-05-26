@@ -18,6 +18,13 @@ config = {
         'level': 'DEBUG',                           # logger level
         'wandb': False,                              # enable wandb logging
     },
+    
+    'encoding': {
+        'encode_programs': True,     # Whether to encode programs from id.txt
+        'encode_demos': True,        # Whether to encode demos from data.hdf5
+        'program_latent_dim': 64,    # Program latent dimension 
+        'demo_latent_dim': 64,       # Demo latent dimension
+    },
 
     # config to load and save networks
     'net': {

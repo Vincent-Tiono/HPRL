@@ -272,20 +272,11 @@ class SupervisedModel(BaseModel):
                 }
 
         programs, ids, trg_mask, s_h, s_h_len, a_h, a_h_len = batch
+        encode_programs = self.config.get('encoding', {}).get('encode_programs', True)
+        encode_demos = self.config.get('encoding', {}).get('encode_demos', True)
 
         """ forward pass """
-        z_output, b_z_output, encoder_time, decoder_time = self.net(programs, trg_mask, s_h, a_h, s_h_len, a_h_len, deterministic=True)
-        z_pred_programs       = z_output['pred_programs']
-        z_pred_programs_len   = z_output['pred_programs_len']
-        z_output_logits       = z_output['output_logits']
-        z_eop_pred_programs   = z_output['eop_pred_programs']
-        z_eop_output_logits   = z_output['eop_output_logits']
-        z_pred_program_masks  = z_output['pred_program_masks']
-        z_action_logits       = z_output['action_logits']
-        z_action_masks        = z_output['action_masks']
-        pre_tanh_z            = z_output['pre_tanh']
-        z                     = z_output['z']
-        z_mu = z_output['z_mu']
+        b_z_output, encoder_time, decoder_time = self.net(programs, trg_mask, s_h, a_h, s_h_len, a_h_len, deterministic=True)
 
         b_z_pred_programs       = b_z_output['pred_programs']
         b_z_pred_programs_len   = b_z_output['pred_programs_len']
@@ -300,24 +291,24 @@ class SupervisedModel(BaseModel):
         b_z_mu = b_z_output['z_mu']
 
         if self.config['normalize_latent']:
-            z = z / torch.norm(z, dim=-1, keepdim=True)  # Normalize z
+            # z = z / torch.norm(z, dim=-1, keepdim=True)  # Normalize z
             b_z = b_z / torch.norm(b_z, dim=-1, keepdim=True)  # Normalize b_z
-        zbz_analysis = analyze_z_bz(z, b_z)
+        # zbz_analysis = analyze_z_bz(z, b_z)
 
         # calculate latent program embedding norm
-        assert len(pre_tanh_z.shape) == 2
-        batch_pre_tanh_z_inf_norm_mean = LA.vector_norm(pre_tanh_z.abs(), ord=float('inf'), dim=1).mean()
-        batch_pre_tanh_z_mean_mean  = pre_tanh_z.abs().mean(dim=1).mean()
-        batch_pre_tanh_z_outlier_ratio = (pre_tanh_z.abs() > 0.98).sum() / len(pre_tanh_z.flatten())
+        # assert len(pre_tanh_z.shape) == 2
+        # batch_pre_tanh_z_inf_norm_mean = LA.vector_norm(pre_tanh_z.abs(), ord=float('inf'), dim=1).mean()
+        # batch_pre_tanh_z_mean_mean  = pre_tanh_z.abs().mean(dim=1).mean()
+        # batch_pre_tanh_z_outlier_ratio = (pre_tanh_z.abs() > 0.98).sum() / len(pre_tanh_z.flatten())
 
 
         """ flatten inputs and outputs for loss calculation """
         # skip first token DEF for loss calculation
         targets = programs[:, 1:].contiguous().view(-1, 1)
         trg_mask = trg_mask[:, 1:].contiguous().view(-1, 1)
-        z_logits = z_output_logits.view(-1, z_output_logits.shape[-1])
+        # z_logits = z_output_logits.view(-1, z_output_logits.shape[-1])
         b_z_logits = b_z_output_logits.view(-1, b_z_output_logits.shape[-1])
-        pred_mask = z_pred_program_masks.view(-1, 1)
+        pred_mask = b_z_pred_program_masks.view(-1, 1)
         # need to penalize shorter and longer predicted programs
         vae_mask = torch.max(pred_mask, trg_mask)
 
@@ -329,60 +320,60 @@ class SupervisedModel(BaseModel):
         z_lat_loss, bz_lat_loss, comb_lat_loss, rec_loss, z_condition_loss, b_z_condition_loss = zero_tensor, zero_tensor, zero_tensor, zero_tensor, zero_tensor, zero_tensor
         z_cond_t_accuracy, z_cond_p_accuracy, b_z_cond_t_accuracy, b_z_cond_p_accuracy = zero_tensor, zero_tensor, zero_tensor, zero_tensor
         if not self._disable_decoder:
-            z_rec_loss = self.loss_fn(z_logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
+            # z_rec_loss = self.loss_fn(z_logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
             b_z_rec_loss = self.loss_fn(b_z_logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
         if not self._vanilla_ae:
-            z_lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.z_sigma)
+            # z_lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.z_sigma)
             bz_lat_loss = self.net.vae.latent_loss(self.net.vae.b_z_mean, self.net.vae.b_z_sigma)
-            comb_lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.b_z_mean)
+            # comb_lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.b_z_mean)
         if not self._disable_condition:
-            z_condition_loss, z_cond_t_accuracy, z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, z_action_logits,
-                                                                                        z_action_masks)
+            # z_condition_loss, z_cond_t_accuracy, z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, z_action_logits, z_action_masks)
             b_z_condition_loss, b_z_cond_t_accuracy, b_z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len,
                                                                                                b_z_action_logits,
                                                                                                b_z_action_masks)
-        clip_loss, clip_acc = self._get_clip_loss(z_mu, b_z_mu)
-        hinge_loss = self._get_hinge_loss(z_mu, b_z_mu, self.config['loss']['contrastive_loss_margin'])
-        mse_loss = self._get_mse_loss(z_mu, b_z_mu)
-        cosine_sim_loss = 1-F.cosine_similarity(z_mu, b_z_mu, dim=1).mean()
-        l2_loss = torch.norm(z_mu - b_z_mu, p=2, dim=1).mean()
-        l3_loss = torch.norm(z_mu - b_z_mu, p=3, dim=1).mean()
+        # clip_loss, clip_acc = self._get_clip_loss(z_mu, b_z_mu)
+        # hinge_loss = self._get_hinge_loss(z_mu, b_z_mu, self.config['loss']['contrastive_loss_margin'])
+        # mse_loss = self._get_mse_loss(z_mu, b_z_mu)
+        # cosine_sim_loss = 1-F.cosine_similarity(z_mu, b_z_mu, dim=1).mean()
+        # l2_loss = torch.norm(z_mu - b_z_mu, p=2, dim=1).mean()
+        # l3_loss = torch.norm(z_mu - b_z_mu, p=3, dim=1).mean()
 
         # total loss
         cfg_losses = self.config['loss']['enabled_losses']
         loss = 0.0
 
         if not self.program_frozen and not self.start_decoder_finetune:
-            if cfg_losses.get('z_rec', False):
-                loss += z_rec_loss
-            if cfg_losses.get('b_z_rec', False):
-                loss += b_z_rec_loss
-            if 'clip' in cfg_losses.get('contrastive_loss', []):
-                loss += clip_loss
-            if 'hinge' in cfg_losses.get('contrastive_loss', []):
-                loss += hinge_loss
-            if 'mse' in cfg_losses.get('contrastive_loss', []):
-                loss += mse_loss
-            if 'cosine' in cfg_losses.get('contrastive_loss', []):
-                loss += cosine_sim_loss
-            if 'l2' in cfg_losses.get('contrastive_loss', []):
-                loss += l2_loss
-            if 'l3' in cfg_losses.get('contrastive_loss', []):
-                loss += l3_loss
+            # if cfg_losses.get('z_rec', False):
+            #     loss += z_rec_loss
+            # if cfg_losses.get('b_z_rec', False):
+            #     loss += b_z_rec_loss
+            # if 'clip' in cfg_losses.get('contrastive_loss', []):
+            #     loss += clip_loss
+            # if 'hinge' in cfg_losses.get('contrastive_loss', []):
+            #     loss += hinge_loss
+            # if 'mse' in cfg_losses.get('contrastive_loss', []):
+            #     loss += mse_loss
+            # if 'cosine' in cfg_losses.get('contrastive_loss', []):
+            #     loss += cosine_sim_loss
+            # if 'l2' in cfg_losses.get('contrastive_loss', []):
+            #     loss += l2_loss
+            # if 'l3' in cfg_losses.get('contrastive_loss', []):
+            #     loss += l3_loss
             if cfg_losses.get('latent', False) != "none":
                 if cfg_losses.get('z_latent', False) == 'separate':
-                    loss += self.config['loss']['z_latent_loss_coef'] * z_lat_loss + self.config['loss']['bz_latent_loss_coef'] * bz_lat_loss
+                    # loss += self.config['loss']['z_latent_loss_coef'] * z_lat_loss + self.config['loss']['bz_latent_loss_coef'] * bz_lat_loss
+                    loss += self.config['loss']['bz_latent_loss_coef'] * bz_lat_loss
                 elif cfg_losses.get('z_latent', False) == 'combined':
                     loss += self.config['loss']['z_latent_loss_coef'] * comb_lat_loss
-            if cfg_losses.get('z_condition', False):
-                loss += self.config['loss']['condition_loss_coef'] * z_condition_loss
+            # if cfg_losses.get('z_condition', False):
+            #     loss += self.config['loss']['condition_loss_coef'] * z_condition_loss
             if cfg_losses.get('b_z_condition', False):
                 loss += self.config['loss']['condition_loss_coef'] * b_z_condition_loss
-        elif self.program_frozen:
-            # If the program is frozen, we only compute the cosine loss
-            loss += cosine_sim_loss
-        elif self.start_decoder_finetune:
-            loss += b_z_rec_loss
+        # elif self.program_frozen:
+        #     # If the program is frozen, we only compute the cosine loss
+        #     loss += cosine_sim_loss
+        # elif self.start_decoder_finetune:
+        #     loss += b_z_rec_loss
 
         # loss = contrastive_loss 
 
@@ -394,106 +385,106 @@ class SupervisedModel(BaseModel):
             
         """ calculate accuracy """
         with torch.no_grad():
-            batch_shape = z_output_logits.shape[:-1]
-            z_t_accuracy, z_p_accuracy = calculate_accuracy(z_logits, targets, vae_mask, batch_shape)
+            batch_shape = b_z_output_logits.shape[:-1]
+            # z_t_accuracy, z_p_accuracy = calculate_accuracy(z_logits, targets, vae_mask, batch_shape)
             b_z_t_accuracy, b_z_p_accuracy = calculate_accuracy(b_z_logits, targets, vae_mask, batch_shape)
-            z_greedy_accuracies, z_generated_programs, z_glogits = self._greedy_rollout(batch, z, targets, trg_mask, mode)
+            # z_greedy_accuracies, z_generated_programs, z_glogits = self._greedy_rollout(batch, z, targets, trg_mask, mode)
             b_z_greedy_accuracies, b_z_generated_programs, b_z_glogits = self._greedy_rollout(batch, b_z, targets, trg_mask, mode)
-            z_greedy_t_accuracy, z_greedy_p_accuracy, z_greedy_a_accuracy, z_greedy_d_accuracy = z_greedy_accuracies
+            # z_greedy_t_accuracy, z_greedy_p_accuracy, z_greedy_a_accuracy, z_greedy_d_accuracy = z_greedy_accuracies
             b_z_greedy_t_accuracy, b_z_greedy_p_accuracy, b_z_greedy_a_accuracy, b_z_greedy_d_accuracy = b_z_greedy_accuracies
         
         if mode == 'train':
             # Log metrics with the global step
             wandb.log({
                 f'{mode}/loss/total': loss.item(),
-                f'{mode}/loss/z_rec': z_rec_loss.item(),
+                # f'{mode}/loss/z_rec': z_rec_loss.item(),
                 f'{mode}/loss/b_z_rec': b_z_rec_loss.item(),
                 f'{mode}/loss/z_lat': z_lat_loss.item(),
                 f'{mode}/loss/b_z_lat':bz_lat_loss.item(),
                 f'{mode}/loss/comb_lat': comb_lat_loss.item(),
                 f'{mode}/loss/z_condition': z_condition_loss.item(),
                 f'{mode}/loss/b_z_condition': b_z_condition_loss.item(),
-                f'{mode}/loss/clip': clip_loss.item(),
-                f'{mode}/loss/clip_accuracy': clip_acc.item(),
-                f'{mode}/loss/contrastive': hinge_loss.item(),
-                f'{mode}/loss/mse': mse_loss.item(),
-                f'{mode}/loss/cosine': cosine_sim_loss.item(),
-                f'{mode}/loss/l2': l2_loss.item(),
-                f'{mode}/loss/l3': l3_loss.item(),
+                # f'{mode}/loss/clip': clip_loss.item(),
+                # f'{mode}/loss/clip_accuracy': clip_acc.item(),
+                # f'{mode}/loss/contrastive': hinge_loss.item(),
+                # f'{mode}/loss/mse': mse_loss.item(),
+                # f'{mode}/loss/cosine': cosine_sim_loss.item(),
+                # f'{mode}/loss/l2': l2_loss.item(),
+                # f'{mode}/loss/l3': l3_loss.item(),
                 f'{mode}/z_vs_b/decoder_token_accuracy': {
-                    'z': z_t_accuracy.item(),
+                    # 'z': z_t_accuracy.item(),
                     'b_z': b_z_t_accuracy.item()
                 },
                 f'{mode}/z_vs_b/decoder_program_accuracy': {
-                    'z': z_p_accuracy.item(),
+                    # 'z': z_p_accuracy.item(),
                     'b_z': b_z_p_accuracy.item()
                 },
                 f'{mode}/z_vs_b/condition_action_accuracy': {
-                    'z': z_cond_t_accuracy.item(),
+                    # 'z': z_cond_t_accuracy.item(),
                     'b_z': b_z_cond_t_accuracy.item()
                 },
                 f'{mode}/z_vs_b/condition_demo_accuracy': {
-                    'z': z_cond_p_accuracy.item(),
+                    # 'z': z_cond_p_accuracy.item(),
                     'b_z': b_z_cond_p_accuracy.item()
                 },
-                f'{mode}/z_vs_b/z_norm_mean': zbz_analysis['z_norm'].item(),
-                f'{mode}/z_vs_b/bz_norm_mean': zbz_analysis['bz_norm'].item(),
-                f'{mode}/z_vs_b/norm_ratio': zbz_analysis['scale_ratio'].item(),
-                f'{mode}/z_vs_b/z_bz_angle': zbz_analysis['angle_deg'],
+                # f'{mode}/z_vs_b/z_norm_mean': zbz_analysis['z_norm'].item(),
+                # f'{mode}/z_vs_b/bz_norm_mean': zbz_analysis['bz_norm'].item(),
+                # f'{mode}/z_vs_b/norm_ratio': zbz_analysis['scale_ratio'].item(),
+                # f'{mode}/z_vs_b/z_bz_angle': zbz_analysis['angle_deg'],
             }, step=self.global_train_step)
             
         elif mode == "eval":
             # Store metrics for averaging later
             self.eval_metrics['loss/total'].append(loss.item())
-            self.eval_metrics['loss/z_rec'].append(z_rec_loss.item())
+            # self.eval_metrics['loss/z_rec'].append(z_rec_loss.item())
             self.eval_metrics['loss/b_z_rec'].append(b_z_rec_loss.item())
-            self.eval_metrics['loss/z_lat'].append(z_lat_loss.item())
-            self.eval_metrics['loss/b_z_lat'].append(bz_lat_loss.item())
-            self.eval_metrics['loss/comb_lat'].append(comb_lat_loss.item())
-            self.eval_metrics['loss/z_condition'].append(z_condition_loss.item())
-            self.eval_metrics['loss/b_z_condition'].append(b_z_condition_loss.item())
-            self.eval_metrics['loss/clip'].append(clip_loss.item())
-            self.eval_metrics['loss/clip_accuracy'].append(clip_acc.item())
-            self.eval_metrics['loss/contrastive'].append(hinge_loss.item())
-            self.eval_metrics['loss/mse'].append(mse_loss.item())
-            self.eval_metrics['loss/cosine'].append(cosine_sim_loss.item())
-            self.eval_metrics['loss/l2'].append(l2_loss.item())
-            self.eval_metrics['loss/l3'].append(l3_loss.item())
+            # self.eval_metrics['loss/z_lat'].append(z_lat_loss.item())
+            # self.eval_metrics['loss/b_z_lat'].append(bz_lat_loss.item())
+            # self.eval_metrics['loss/comb_lat'].append(comb_lat_loss.item())
+            # self.eval_metrics['loss/z_condition'].append(z_condition_loss.item())
+            # self.eval_metrics['loss/b_z_condition'].append(b_z_condition_loss.item())
+            # self.eval_metrics['loss/clip'].append(clip_loss.item())
+            # self.eval_metrics['loss/clip_accuracy'].append(clip_acc.item())
+            # self.eval_metrics['loss/contrastive'].append(hinge_loss.item())
+            # self.eval_metrics['loss/mse'].append(mse_loss.item())
+            # self.eval_metrics['loss/cosine'].append(cosine_sim_loss.item())
+            # self.eval_metrics['loss/l2'].append(l2_loss.item())
+            # self.eval_metrics['loss/l3'].append(l3_loss.item())
 
             
-            self.eval_metrics['z_vs_b/decoder_token_accuracy/z'].append(z_t_accuracy.item())
+            # self.eval_metrics['z_vs_b/decoder_token_accuracy/z'].append(z_t_accuracy.item())
             self.eval_metrics['z_vs_b/decoder_token_accuracy/b_z'].append(b_z_t_accuracy.item())
-            self.eval_metrics['z_vs_b/decoder_program_accuracy/z'].append(z_p_accuracy.item())
+            # self.eval_metrics['z_vs_b/decoder_program_accuracy/z'].append(z_p_accuracy.item())
             self.eval_metrics['z_vs_b/decoder_program_accuracy/b_z'].append(b_z_p_accuracy.item())
-            self.eval_metrics['z_vs_b/condition_action_accuracy/z'].append(z_cond_t_accuracy.item())
+            # self.eval_metrics['z_vs_b/condition_action_accuracy/z'].append(z_cond_t_accuracy.item())
             self.eval_metrics['z_vs_b/condition_action_accuracy/b_z'].append(b_z_cond_t_accuracy.item())
-            self.eval_metrics['z_vs_b/condition_demo_accuracy/z'].append(z_cond_p_accuracy.item())
+            # self.eval_metrics['z_vs_b/condition_demo_accuracy/z'].append(z_cond_p_accuracy.item())
             self.eval_metrics['z_vs_b/condition_demo_accuracy/b_z'].append(b_z_cond_p_accuracy.item())
             
             # Store greedy metrics if available
-            self.eval_metrics['z_vs_b/decoder_greedy_token_accuracy/z'].append(z_greedy_t_accuracy.item())
+            # self.eval_metrics['z_vs_b/decoder_greedy_token_accuracy/z'].append(z_greedy_t_accuracy.item())
             self.eval_metrics['z_vs_b/decoder_greedy_token_accuracy/b_z'].append(b_z_greedy_t_accuracy.item())
-            self.eval_metrics['z_vs_b/decoder_greedy_program_accuracy/z'].append(z_greedy_p_accuracy.item())
+            # self.eval_metrics['z_vs_b/decoder_greedy_program_accuracy/z'].append(z_greedy_p_accuracy.item())
             self.eval_metrics['z_vs_b/decoder_greedy_program_accuracy/b_z'].append(b_z_greedy_p_accuracy.item())
-            self.eval_metrics['z_vs_b/condition_greedy_action_accuracy/z'].append(z_greedy_a_accuracy.item())
+            # self.eval_metrics['z_vs_b/condition_greedy_action_accuracy/z'].append(z_greedy_a_accuracy.item())
             self.eval_metrics['z_vs_b/condition_greedy_action_accuracy/b_z'].append(b_z_greedy_a_accuracy.item())
-            self.eval_metrics['z_vs_b/condition_greedy_demo_accuracy/z'].append(z_greedy_d_accuracy.item())
+            # self.eval_metrics['z_vs_b/condition_greedy_demo_accuracy/z'].append(z_greedy_d_accuracy.item())
             self.eval_metrics['z_vs_b/condition_greedy_demo_accuracy/b_z'].append(b_z_greedy_d_accuracy.item())
-            self.eval_metrics['z_vs_b/z_norm_mean'].append(zbz_analysis['z_norm'])
-            self.eval_metrics['z_vs_b/bz_norm_mean'].append(zbz_analysis['bz_norm'])
-            self.eval_metrics['z_vs_b/norm_ratio'].append(zbz_analysis['scale_ratio'])
-            self.eval_metrics['z_vs_b/z_bz_angle'].append(zbz_analysis['angle_deg'])
+            # self.eval_metrics['z_vs_b/z_norm_mean'].append(zbz_analysis['z_norm'])
+            # self.eval_metrics['z_vs_b/bz_norm_mean'].append(zbz_analysis['bz_norm'])
+            # self.eval_metrics['z_vs_b/norm_ratio'].append(zbz_analysis['scale_ratio'])
+            # self.eval_metrics['z_vs_b/z_bz_angle'].append(zbz_analysis['angle_deg'])
 
 
         batch_info = {
-            'z_decoder_token_accuracy': z_t_accuracy.detach().cpu().numpy().item(),
-            'z_decoder_program_accuracy': z_p_accuracy.detach().cpu().numpy().item(),
+            # 'z_decoder_token_accuracy': z_t_accuracy.detach().cpu().numpy().item(),
+            # 'z_decoder_program_accuracy': z_p_accuracy.detach().cpu().numpy().item(),
             'z_condition_action_accuracy': z_cond_t_accuracy.detach().cpu().numpy().item(),
             'z_condition_demo_accuracy': z_cond_p_accuracy.detach().cpu().numpy().item(),
-            'z_decoder_greedy_token_accuracy': z_greedy_t_accuracy.detach().cpu().numpy().item(),
-            'z_decoder_greedy_program_accuracy': z_greedy_p_accuracy.detach().cpu().numpy().item(),
-            'z_condition_greedy_action_accuracy': z_greedy_a_accuracy.detach().cpu().numpy().item(),
-            'z_condition_greedy_demo_accuracy': z_greedy_d_accuracy.detach().cpu().numpy().item(),
+            # 'z_decoder_greedy_token_accuracy': z_greedy_t_accuracy.detach().cpu().numpy().item(),
+            # 'z_decoder_greedy_program_accuracy': z_greedy_p_accuracy.detach().cpu().numpy().item(),
+            # 'z_condition_greedy_action_accuracy': z_greedy_a_accuracy.detach().cpu().numpy().item(),
+            # 'z_condition_greedy_demo_accuracy': z_greedy_d_accuracy.detach().cpu().numpy().item(),
             'b_z_decoder_token_accuracy': b_z_t_accuracy.detach().cpu().numpy().item(),
             'b_z_decoder_program_accuracy': b_z_p_accuracy.detach().cpu().numpy().item(),
             'b_z_condition_action_accuracy': b_z_cond_t_accuracy.detach().cpu().numpy().item(),
@@ -502,38 +493,38 @@ class SupervisedModel(BaseModel):
             'b_z_decoder_greedy_program_accuracy': b_z_greedy_p_accuracy.detach().cpu().numpy().item(),
             'b_z_condition_greedy_action_accuracy': b_z_greedy_a_accuracy.detach().cpu().numpy().item(),
             'b_z_condition_greedy_demo_accuracy': b_z_greedy_d_accuracy.detach().cpu().numpy().item(),
-            'clip_loss_accuracy': clip_acc.detach().cpu().numpy().item(),
-            'pre_tanh_z_inf_norm_mean': batch_pre_tanh_z_inf_norm_mean.detach().cpu().numpy().item(),
-            'pre_tanh_z_mean_mean': batch_pre_tanh_z_mean_mean.detach().cpu().numpy().item(),
-            'pre_tanh_z_outlier_ratio': batch_pre_tanh_z_outlier_ratio.detach().cpu().numpy().item(),
+            # 'clip_loss_accuracy': clip_acc.detach().cpu().numpy().item(),
+            # 'pre_tanh_z_inf_norm_mean': batch_pre_tanh_z_inf_norm_mean.detach().cpu().numpy().item(),
+            # 'pre_tanh_z_mean_mean': batch_pre_tanh_z_mean_mean.detach().cpu().numpy().item(),
+            # 'pre_tanh_z_outlier_ratio': batch_pre_tanh_z_outlier_ratio.detach().cpu().numpy().item(),
             'total_loss': loss.detach().cpu().numpy().item(),
-            'z_rec_loss': z_rec_loss.detach().cpu().numpy().item(),
+            # 'z_rec_loss': z_rec_loss.detach().cpu().numpy().item(),
             'b_z_rec_loss': b_z_rec_loss.detach().cpu().numpy().item(),
             'z_lat_loss': z_lat_loss.detach().cpu().numpy().item(),
             'b_z_lat_loss': bz_lat_loss.detach().cpu().numpy().item(),
             'comb_lat_loss': comb_lat_loss.detach().cpu().numpy().item(),
             'z_condition_loss': z_condition_loss.detach().cpu().numpy().item(),
             'b_z_condition_loss': b_z_condition_loss.detach().cpu().numpy().item(),
-            'clip_loss': clip_loss.detach().cpu().numpy().item(),
-            'contrastive_loss': hinge_loss.detach().cpu().numpy().item(),
-            'mse_loss': mse_loss.detach().cpu().numpy().item(),
-            'cosine_loss': cosine_sim_loss.detach().cpu().numpy().item(),
-            'l2_loss': l2_loss.detach().cpu().numpy().item(),
-            'l3_loss': l3_loss.detach().cpu().numpy().item(),
+            # 'clip_loss': clip_loss.detach().cpu().numpy().item(),
+            # 'contrastive_loss': hinge_loss.detach().cpu().numpy().item(),
+            # 'mse_loss': mse_loss.detach().cpu().numpy().item(),
+            # 'cosine_loss': cosine_sim_loss.detach().cpu().numpy().item(),
+            # 'l2_loss': l2_loss.detach().cpu().numpy().item(),
+            # 'l3_loss': l3_loss.detach().cpu().numpy().item(),
             'gt_programs': programs.detach().cpu().numpy(),
-            'z_pred_programs': z_pred_programs.detach().cpu().numpy(),
+            # 'z_pred_programs': z_pred_programs.detach().cpu().numpy(),
             'b_z_pred_programs': b_z_pred_programs.detach().cpu().numpy(),
-            'z_generated_programs': z_generated_programs,
+            # 'z_generated_programs': z_generated_programs,
             'b_z_generated_programs': b_z_generated_programs,
             'program_ids': ids,
-            'latent_vectors': z.detach().cpu().numpy().tolist(),
+            # 'latent_vectors': z.detach().cpu().numpy().tolist(),
             'behavior_vectors': b_z.detach().cpu().numpy().tolist(),
             'encoder_time': encoder_time,
             'decoder_time': decoder_time,
-            'zbz_bz_norm': zbz_analysis['bz_norm'].detach().cpu().numpy().item(),
-            'zbz_z_norm': zbz_analysis['z_norm'].detach().cpu().numpy().item(),
-            'zbz_scale_ratio': zbz_analysis['scale_ratio'].detach().cpu().numpy().item(),
-            'zbz_angle_deg': zbz_analysis['angle_deg'],
+            # 'zbz_bz_norm': zbz_analysis['bz_norm'].detach().cpu().numpy().item(),
+            # 'zbz_z_norm': zbz_analysis['z_norm'].detach().cpu().numpy().item(),
+            # 'zbz_scale_ratio': zbz_analysis['scale_ratio'].detach().cpu().numpy().item(),
+            # 'zbz_angle_deg': zbz_analysis['angle_deg'],
             }
 
         return batch_info
