@@ -276,122 +276,198 @@ class SupervisedModel(BaseModel):
         encode_demos = self.config.get('encoding', {}).get('encode_demos', True)
 
         """ forward pass """
+        # net is ProgramVAE
         b_z_output, encoder_time, decoder_time = self.net(programs, trg_mask, s_h, a_h, s_h_len, a_h_len, deterministic=True)
 
-        b_z_pred_programs       = b_z_output['pred_programs']
-        b_z_pred_programs_len   = b_z_output['pred_programs_len']
-        b_z_output_logits       = b_z_output['output_logits']
-        b_z_eop_pred_programs   = b_z_output['eop_pred_programs']
-        b_z_eop_output_logits   = b_z_output['eop_output_logits']
-        b_z_pred_program_masks  = b_z_output['pred_program_masks']
-        b_z_action_logits       = b_z_output['action_logits']
-        b_z_action_masks        = b_z_output['action_masks']
-        pre_tanh_b_z            = b_z_output['pre_tanh']
-        b_z                     = b_z_output['z']
-        b_z_mu = b_z_output['z_mu']
+        if self.net.vae._use_vqvae:
+            # If using VQVAE, we get the output directly from the VQVAE
+            b_z_pred_programs       = b_z_output['pred_programs']
+            b_z_pred_programs_len   = b_z_output['pred_programs_len']
+            b_z_output_logits       = b_z_output['output_logits']
+            b_z_eop_pred_programs   = b_z_output['eop_pred_programs']
+            b_z_eop_output_logits   = b_z_output['eop_output_logits']
+            b_z_pred_program_masks  = b_z_output['pred_program_masks']
+            b_z_action_logits       = b_z_output['action_logits']
+            b_z_action_masks        = b_z_output['action_masks']
+            b_z_q_st                = b_z_output['b_z_q_st']
+            b_z_q                   = b_z_output['b_z_q']
+            indices                  = b_z_output['indices']
+            if self.config['normalize_latent']:
+                # z = z / torch.norm(z, dim=-1, keepdim=True)  # Normalize z
+                b_z_q_st = b_z_q_st / torch.norm(b_z_q_st, dim=-1, keepdim=True)  # Normalize b_z
+            """ flatten inputs and outputs for loss calculation """
+            # skip first token DEF for loss calculation
+            targets = programs[:, 1:].contiguous().view(-1, 1)
+            trg_mask = trg_mask[:, 1:].contiguous().view(-1, 1)
+            # z_logits = z_output_logits.view(-1, z_output_logits.shape[-1])
+            b_z_logits = b_z_output_logits.view(-1, b_z_output_logits.shape[-1])
+            pred_mask = b_z_pred_program_masks.view(-1, 1)
+            # need to penalize shorter and longer predicted programs
+            vae_mask = torch.max(pred_mask, trg_mask)
 
-        if self.config['normalize_latent']:
-            # z = z / torch.norm(z, dim=-1, keepdim=True)  # Normalize z
-            b_z = b_z / torch.norm(b_z, dim=-1, keepdim=True)  # Normalize b_z
-        # zbz_analysis = analyze_z_bz(z, b_z)
+            # Do backprop
+            if mode == 'train':
+                self.optimizer.zero_grad()
 
-        # calculate latent program embedding norm
-        # assert len(pre_tanh_z.shape) == 2
-        # batch_pre_tanh_z_inf_norm_mean = LA.vector_norm(pre_tanh_z.abs(), ord=float('inf'), dim=1).mean()
-        # batch_pre_tanh_z_mean_mean  = pre_tanh_z.abs().mean(dim=1).mean()
-        # batch_pre_tanh_z_outlier_ratio = (pre_tanh_z.abs() > 0.98).sum() / len(pre_tanh_z.flatten())
+            zero_tensor = torch.tensor([0.0], device=self.device, requires_grad=False)
+            z_lat_loss, bz_lat_loss, comb_lat_loss, rec_loss, z_condition_loss, b_z_condition_loss = zero_tensor, zero_tensor, zero_tensor, zero_tensor, zero_tensor, zero_tensor
+            z_cond_t_accuracy, z_cond_p_accuracy, b_z_cond_t_accuracy, b_z_cond_p_accuracy = zero_tensor, zero_tensor, zero_tensor, zero_tensor
+            if not self._disable_decoder:
+                b_z_rec_loss = self.loss_fn(b_z_logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
+            # if not self._vanilla_ae:
+            #     z_lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.z_sigma)
+            #     bz_lat_loss = self.net.vae.latent_loss(self.net.vae.b_z_mean, self.net.vae.b_z_sigma)
+            #     comb_lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.b_z_mean)
+            if not self._disable_condition:
+                # z_condition_loss, z_cond_t_accuracy, z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, z_action_logits, z_action_masks)
+                b_z_condition_loss, b_z_cond_t_accuracy, b_z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, b_z_action_logits, b_z_action_masks)
 
 
-        """ flatten inputs and outputs for loss calculation """
-        # skip first token DEF for loss calculation
-        targets = programs[:, 1:].contiguous().view(-1, 1)
-        trg_mask = trg_mask[:, 1:].contiguous().view(-1, 1)
-        # z_logits = z_output_logits.view(-1, z_output_logits.shape[-1])
-        b_z_logits = b_z_output_logits.view(-1, b_z_output_logits.shape[-1])
-        pred_mask = b_z_pred_program_masks.view(-1, 1)
-        # need to penalize shorter and longer predicted programs
-        vae_mask = torch.max(pred_mask, trg_mask)
+            # total loss
+            cfg_losses = self.config['loss']['enabled_losses']
+            loss = 0.0
 
-        # Do backprop
-        if mode == 'train':
-            self.optimizer.zero_grad()
-
-        zero_tensor = torch.tensor([0.0], device=self.device, requires_grad=False)
-        z_lat_loss, bz_lat_loss, comb_lat_loss, rec_loss, z_condition_loss, b_z_condition_loss = zero_tensor, zero_tensor, zero_tensor, zero_tensor, zero_tensor, zero_tensor
-        z_cond_t_accuracy, z_cond_p_accuracy, b_z_cond_t_accuracy, b_z_cond_p_accuracy = zero_tensor, zero_tensor, zero_tensor, zero_tensor
-        if not self._disable_decoder:
-            # z_rec_loss = self.loss_fn(z_logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
-            b_z_rec_loss = self.loss_fn(b_z_logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
-        if not self._vanilla_ae:
-            # z_lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.z_sigma)
-            bz_lat_loss = self.net.vae.latent_loss(self.net.vae.b_z_mean, self.net.vae.b_z_sigma)
-            # comb_lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.b_z_mean)
-        if not self._disable_condition:
-            # z_condition_loss, z_cond_t_accuracy, z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, z_action_logits, z_action_masks)
-            b_z_condition_loss, b_z_cond_t_accuracy, b_z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len,
-                                                                                               b_z_action_logits,
-                                                                                               b_z_action_masks)
-        # clip_loss, clip_acc = self._get_clip_loss(z_mu, b_z_mu)
-        # hinge_loss = self._get_hinge_loss(z_mu, b_z_mu, self.config['loss']['contrastive_loss_margin'])
-        # mse_loss = self._get_mse_loss(z_mu, b_z_mu)
-        # cosine_sim_loss = 1-F.cosine_similarity(z_mu, b_z_mu, dim=1).mean()
-        # l2_loss = torch.norm(z_mu - b_z_mu, p=2, dim=1).mean()
-        # l3_loss = torch.norm(z_mu - b_z_mu, p=3, dim=1).mean()
-
-        # total loss
-        cfg_losses = self.config['loss']['enabled_losses']
-        loss = 0.0
-
-        if not self.program_frozen and not self.start_decoder_finetune:
-            # if cfg_losses.get('z_rec', False):
-            #     loss += z_rec_loss
-            if cfg_losses.get('b_z_rec', False):
-                loss += b_z_rec_loss
-            # if 'clip' in cfg_losses.get('contrastive_loss', []):
-            #     loss += clip_loss
-            # if 'hinge' in cfg_losses.get('contrastive_loss', []):
-            #     loss += hinge_loss
-            # if 'mse' in cfg_losses.get('contrastive_loss', []):
-            #     loss += mse_loss
-            # if 'cosine' in cfg_losses.get('contrastive_loss', []):
+            if not self.program_frozen and not self.start_decoder_finetune:
+                # if cfg_losses.get('z_rec', False):
+                #     loss += z_rec_loss
+                if cfg_losses.get('b_z_rec', False):
+                    loss += b_z_rec_loss
+                if cfg_losses.get('b_z_condition', False):
+                    loss += self.config['loss']['condition_loss_coef'] * b_z_condition_loss
+            # elif self.program_frozen:
+            #     # If the program is frozen, we only compute the cosine loss
             #     loss += cosine_sim_loss
-            # if 'l2' in cfg_losses.get('contrastive_loss', []):
-            #     loss += l2_loss
-            # if 'l3' in cfg_losses.get('contrastive_loss', []):
-            #     loss += l3_loss
-            if cfg_losses.get('latent', False) != "none":
-                if cfg_losses.get('z_latent', False) == 'separate':
-                    # loss += self.config['loss']['z_latent_loss_coef'] * z_lat_loss + self.config['loss']['bz_latent_loss_coef'] * bz_lat_loss
-                    loss += self.config['loss']['bz_latent_loss_coef'] * bz_lat_loss
-                elif cfg_losses.get('z_latent', False) == 'combined':
-                    loss += self.config['loss']['z_latent_loss_coef'] * comb_lat_loss
-            # if cfg_losses.get('z_condition', False):
-            #     loss += self.config['loss']['condition_loss_coef'] * z_condition_loss
-            if cfg_losses.get('b_z_condition', False):
-                loss += self.config['loss']['condition_loss_coef'] * b_z_condition_loss
-        # elif self.program_frozen:
-        #     # If the program is frozen, we only compute the cosine loss
-        #     loss += cosine_sim_loss
-        # elif self.start_decoder_finetune:
-        #     loss += b_z_rec_loss
+            # elif self.start_decoder_finetune:
+            #     loss += b_z_rec_loss
 
-        # loss = contrastive_loss 
-
-        if mode == 'train':
-            loss.backward()
-            self.optimizer.step()
-            # Increment the global step only in training mode
-            self.global_train_step += 1
+            # loss = contrastive_loss 
             
-        """ calculate accuracy """
-        with torch.no_grad():
-            batch_shape = b_z_output_logits.shape[:-1]
-            # z_t_accuracy, z_p_accuracy = calculate_accuracy(z_logits, targets, vae_mask, batch_shape)
-            b_z_t_accuracy, b_z_p_accuracy = calculate_accuracy(b_z_logits, targets, vae_mask, batch_shape)
-            # z_greedy_accuracies, z_generated_programs, z_glogits = self._greedy_rollout(batch, z, targets, trg_mask, mode)
-            b_z_greedy_accuracies, b_z_generated_programs, b_z_glogits = self._greedy_rollout(batch, b_z, targets, trg_mask, mode)
-            # z_greedy_t_accuracy, z_greedy_p_accuracy, z_greedy_a_accuracy, z_greedy_d_accuracy = z_greedy_accuracies
-            b_z_greedy_t_accuracy, b_z_greedy_p_accuracy, b_z_greedy_a_accuracy, b_z_greedy_d_accuracy = b_z_greedy_accuracies
+            vq_loss = F.mse_loss(b_z_q, b_z_q_st.detach())
+            commit_loss = F.mse_loss(b_z_q_st, b_z_q.detach())
+            loss += vq_loss + 0.25 * commit_loss
+            
+            if mode == 'train':
+                loss.backward()
+                self.optimizer.step()
+                # Increment the global step only in training mode
+                self.global_train_step += 1
+                
+            """ calculate accuracy """
+            with torch.no_grad():
+                batch_shape = b_z_output_logits.shape[:-1]
+                # z_t_accuracy, z_p_accuracy = calculate_accuracy(z_logits, targets, vae_mask, batch_shape)
+                b_z_t_accuracy, b_z_p_accuracy = calculate_accuracy(b_z_logits, targets, vae_mask, batch_shape)
+                # z_greedy_accuracies, z_generated_programs, z_glogits = self._greedy_rollout(batch, z, targets, trg_mask, mode)
+                b_z_greedy_accuracies, b_z_generated_programs, b_z_glogits = self._greedy_rollout(batch, b_z_q_st, targets, trg_mask, mode)
+                # z_greedy_t_accuracy, z_greedy_p_accuracy, z_greedy_a_accuracy, z_greedy_d_accuracy = z_greedy_accuracies
+                b_z_greedy_t_accuracy, b_z_greedy_p_accuracy, b_z_greedy_a_accuracy, b_z_greedy_d_accuracy = b_z_greedy_accuracies
+
+        else:
+            b_z_pred_programs       = b_z_output['pred_programs']
+            b_z_pred_programs_len   = b_z_output['pred_programs_len']
+            b_z_output_logits       = b_z_output['output_logits']
+            b_z_eop_pred_programs   = b_z_output['eop_pred_programs']
+            b_z_eop_output_logits   = b_z_output['eop_output_logits']
+            b_z_pred_program_masks  = b_z_output['pred_program_masks']
+            b_z_action_logits       = b_z_output['action_logits']
+            b_z_action_masks        = b_z_output['action_masks']
+            pre_tanh_b_z            = b_z_output['pre_tanh']
+            b_z                     = b_z_output['z']
+            b_z_mu = b_z_output['z_mu']
+            if self.config['normalize_latent']:
+                # z = z / torch.norm(z, dim=-1, keepdim=True)  # Normalize z
+                b_z = b_z / torch.norm(b_z, dim=-1, keepdim=True)  # Normalize b_z
+
+            """ flatten inputs and outputs for loss calculation """
+            # skip first token DEF for loss calculation
+            targets = programs[:, 1:].contiguous().view(-1, 1)
+            trg_mask = trg_mask[:, 1:].contiguous().view(-1, 1)
+            # z_logits = z_output_logits.view(-1, z_output_logits.shape[-1])
+            b_z_logits = b_z_output_logits.view(-1, b_z_output_logits.shape[-1])
+            pred_mask = b_z_pred_program_masks.view(-1, 1)
+            # need to penalize shorter and longer predicted programs
+            vae_mask = torch.max(pred_mask, trg_mask)
+
+            # Do backprop
+            if mode == 'train':
+                self.optimizer.zero_grad()
+
+            zero_tensor = torch.tensor([0.0], device=self.device, requires_grad=False)
+            z_lat_loss, bz_lat_loss, comb_lat_loss, rec_loss, z_condition_loss, b_z_condition_loss = zero_tensor, zero_tensor, zero_tensor, zero_tensor, zero_tensor, zero_tensor
+            z_cond_t_accuracy, z_cond_p_accuracy, b_z_cond_t_accuracy, b_z_cond_p_accuracy = zero_tensor, zero_tensor, zero_tensor, zero_tensor
+            if not self._disable_decoder:
+                # z_rec_loss = self.loss_fn(z_logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
+                b_z_rec_loss = self.loss_fn(b_z_logits[vae_mask.squeeze()], (targets[vae_mask.squeeze()]).view(-1))
+            if not self._vanilla_ae:
+                # z_lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.z_sigma)
+                bz_lat_loss = self.net.vae.latent_loss(self.net.vae.b_z_mean, self.net.vae.b_z_sigma)
+                # comb_lat_loss = self.net.vae.latent_loss(self.net.vae.z_mean, self.net.vae.b_z_mean)
+            if not self._disable_condition:
+                # z_condition_loss, z_cond_t_accuracy, z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len, z_action_logits, z_action_masks)
+                b_z_condition_loss, b_z_cond_t_accuracy, b_z_cond_p_accuracy = self._get_condition_loss(a_h, a_h_len,
+                                                                                                b_z_action_logits,
+                                                                                                b_z_action_masks)
+            # clip_loss, clip_acc = self._get_clip_loss(z_mu, b_z_mu)
+            # hinge_loss = self._get_hinge_loss(z_mu, b_z_mu, self.config['loss']['contrastive_loss_margin'])
+            # mse_loss = self._get_mse_loss(z_mu, b_z_mu)
+            # cosine_sim_loss = 1-F.cosine_similarity(z_mu, b_z_mu, dim=1).mean()
+            # l2_loss = torch.norm(z_mu - b_z_mu, p=2, dim=1).mean()
+            # l3_loss = torch.norm(z_mu - b_z_mu, p=3, dim=1).mean()
+
+            # total loss
+            cfg_losses = self.config['loss']['enabled_losses']
+            loss = 0.0
+
+            if not self.program_frozen and not self.start_decoder_finetune:
+                # if cfg_losses.get('z_rec', False):
+                #     loss += z_rec_loss
+                if cfg_losses.get('b_z_rec', False):
+                    loss += b_z_rec_loss
+                # if 'clip' in cfg_losses.get('contrastive_loss', []):
+                #     loss += clip_loss
+                # if 'hinge' in cfg_losses.get('contrastive_loss', []):
+                #     loss += hinge_loss
+                # if 'mse' in cfg_losses.get('contrastive_loss', []):
+                #     loss += mse_loss
+                # if 'cosine' in cfg_losses.get('contrastive_loss', []):
+                #     loss += cosine_sim_loss
+                # if 'l2' in cfg_losses.get('contrastive_loss', []):
+                #     loss += l2_loss
+                # if 'l3' in cfg_losses.get('contrastive_loss', []):
+                #     loss += l3_loss
+                if cfg_losses.get('latent', False) != "none":
+                    if cfg_losses.get('z_latent', False) == 'separate':
+                        # loss += self.config['loss']['z_latent_loss_coef'] * z_lat_loss + self.config['loss']['bz_latent_loss_coef'] * bz_lat_loss
+                        loss += self.config['loss']['bz_latent_loss_coef'] * bz_lat_loss
+                    elif cfg_losses.get('z_latent', False) == 'combined':
+                        loss += self.config['loss']['z_latent_loss_coef'] * comb_lat_loss
+                # if cfg_losses.get('z_condition', False):
+                #     loss += self.config['loss']['condition_loss_coef'] * z_condition_loss
+                if cfg_losses.get('b_z_condition', False):
+                    loss += self.config['loss']['condition_loss_coef'] * b_z_condition_loss
+            # elif self.program_frozen:
+            #     # If the program is frozen, we only compute the cosine loss
+            #     loss += cosine_sim_loss
+            # elif self.start_decoder_finetune:
+            #     loss += b_z_rec_loss
+
+            # loss = contrastive_loss 
+
+            if mode == 'train':
+                loss.backward()
+                self.optimizer.step()
+                # Increment the global step only in training mode
+                self.global_train_step += 1
+                
+            """ calculate accuracy """
+            with torch.no_grad():
+                batch_shape = b_z_output_logits.shape[:-1]
+                # z_t_accuracy, z_p_accuracy = calculate_accuracy(z_logits, targets, vae_mask, batch_shape)
+                b_z_t_accuracy, b_z_p_accuracy = calculate_accuracy(b_z_logits, targets, vae_mask, batch_shape)
+                # z_greedy_accuracies, z_generated_programs, z_glogits = self._greedy_rollout(batch, z, targets, trg_mask, mode)
+                b_z_greedy_accuracies, b_z_generated_programs, b_z_glogits = self._greedy_rollout(batch, b_z, targets, trg_mask, mode)
+                # z_greedy_t_accuracy, z_greedy_p_accuracy, z_greedy_a_accuracy, z_greedy_d_accuracy = z_greedy_accuracies
+                b_z_greedy_t_accuracy, b_z_greedy_p_accuracy, b_z_greedy_a_accuracy, b_z_greedy_d_accuracy = b_z_greedy_accuracies
         
         if mode == 'train':
             # Log metrics with the global step
@@ -518,7 +594,10 @@ class SupervisedModel(BaseModel):
             'b_z_generated_programs': b_z_generated_programs,
             'program_ids': ids,
             # 'latent_vectors': z.detach().cpu().numpy().tolist(),
-            'behavior_vectors': b_z.detach().cpu().numpy().tolist(),
+            'behavior_vectors': b_z_q_st.detach().cpu().numpy().tolist(),
+            
+            '''REMEMBER TO UNCOMMENT THIS WHEN USING NORMAL VAE INSTEAD OF VQVAE'''
+            # 'behavior_vectors': b_z.detach().cpu().numpy().tolist(),
             'encoder_time': encoder_time,
             'decoder_time': decoder_time,
             # 'zbz_bz_norm': zbz_analysis['bz_norm'].detach().cpu().numpy().item(),

@@ -198,12 +198,63 @@ class Encoder(NNBase):
         else:
             out_dim = self.unit_size
 
-
-
         final_hidden = final_hidden.view(B, R, out_dim)  # [B, R, out_dim]
         behavior_embedding = final_hidden.mean(dim=1)  # [B, out_dim]
 
         return behavior_embedding
+    
+from pretrain.quant_fn import vq, vq_st
+
+class VQEmbedding(nn.Module):
+    def __init__(self, K, D):
+        """
+        Vector quantization layer for behavior embeddings
+        
+        Args:
+            K: Number of embedding vectors (codebook size)
+            D: Dimension of embedding vectors
+        """
+        super().__init__()
+        # Initialize embedding table (codebook)
+        self.embedding = nn.Embedding(K, D)
+        self.embedding.weight.data.uniform_(-1./K, 1./K)
+
+    def forward(self, z_e_x):
+        """
+        Maps input vectors to their closest codebook vectors (indices)
+        
+        Args:
+            z_e_x: Input tensor of shape (B, D) - behavior embeddings
+            
+        Returns:
+            indices: Indices of the closest codebook vectors, shape (B,)
+        """
+        # Find nearest codebook entries using L2 distance
+        return vq(z_e_x, self.embedding.weight)
+
+    def straight_through(self, z_e_x):
+        """
+        Vector quantization with straight-through estimator
+        
+        Args:
+            z_e_x: Behavior embeddings (B, D)
+            
+        Returns:
+            z_q_x: Quantized vectors with straight-through gradients
+            z_q_x_bar: Codebook vectors
+            indices: Codebook indices
+        """
+        # Method 1: Get quantized vectors and indices using straight-through estimator
+        z_q_x, indices = vq_st(z_e_x, self.embedding.weight.detach())
+        
+        # Method 2: Get codebook vectors directly
+        # This provides vectors that have gradients flowing to the codebook
+        z_q_x_bar = torch.index_select(self.embedding.weight,
+            dim=0, index=indices)
+        
+        # z_q_x has the straight-through gradient path for the encoder -> for rec loss
+        # z_q_x_bar has gradients flowing to the codebook -> for commit loss
+        return z_q_x, z_q_x_bar, indices
 
 class Decoder(NNBase):
     def __init__(self, num_inputs, num_outputs, recurrent=False, hidden_size=64, rnn_type='GRU', two_head=False, dropout=0.0, unit_size=256, **kwargs):
@@ -563,6 +614,13 @@ class VAE(torch.nn.Module):
 
     def __init__(self, num_inputs, num_program_tokens, **kwargs):
         super(VAE, self).__init__()
+        
+        self._use_vqvae = kwargs['VQVAE']['use_vqvae']
+        self.codebook_size = kwargs['VQVAE']['codebook_size']
+        self.embedding_dim = kwargs['VQVAE']['embedding_dim']
+        self.commitment_cost = kwargs['VQVAE']['commitment_cost']
+        self._use_linear = kwargs['net']['use_linear']
+        
         self._two_head = kwargs['two_head']
         self._vanilla_ae = kwargs['AE']
         self._tanh_after_mu_sigma = kwargs['net']['tanh_after_mu_sigma']
@@ -591,15 +649,22 @@ class VAE(torch.nn.Module):
                                             dropout=kwargs['net']['dropout'], use_linear=kwargs['net']['use_linear'],
                                             unit_size=kwargs['net']['num_rnn_encoder_units'],
                                             **kwargs)
+            
+        if self._use_vqvae:
+            # Vector Quantization layer
+            self.vq_embedding = VQEmbedding(self.codebook_size, self.embedding_dim)
+        else:
+            # For normal VAE
+            self._bz_enc_mu = torch.nn.Linear(kwargs['num_lstm_cell_units'], kwargs['num_lstm_cell_units'])
+            self._bz_enc_log_sigma = torch.nn.Linear(kwargs['num_lstm_cell_units'], kwargs['num_lstm_cell_units'])
+            self.tanh = torch.nn.Tanh()
+        
         if True:
             self.decoder = Decoder(num_inputs, num_outputs, recurrent=kwargs['recurrent_policy'],
                                 hidden_size=kwargs['num_lstm_cell_units'], rnn_type=kwargs['net']['rnn_type'],
                                 num_program_tokens=num_program_tokens, dropout=kwargs['net']['dropout'], 
                                 unit_size=kwargs['net']['num_rnn_decoder_units'], **kwargs)
-        self._bz_enc_mu = torch.nn.Linear(kwargs['num_lstm_cell_units'], kwargs['num_lstm_cell_units'])
-        self._bz_enc_log_sigma = torch.nn.Linear(kwargs['num_lstm_cell_units'], kwargs['num_lstm_cell_units'])
-        self.tanh = torch.nn.Tanh()
-
+        
     @property
     def latent_dim(self):
         return  self._enc_mu.out_features
@@ -626,59 +691,32 @@ class VAE(torch.nn.Module):
         return 0.5 * torch.mean(mean_sq + stddev_sq - torch.log(stddev_sq) - 1)
 
     def forward(self, programs, program_masks, teacher_enforcing, a_h, s_h, a_h_len, s_h_len, deterministic=True):
-        # program_lens = program_masks.squeeze().sum(dim=-1)
-
         t = time.time()
-        # if self._use_transformer_encoder:
-        #     program_masks = program_masks.squeeze().unsqueeze(-2)
-        #     _, h_enc = self.program_encoder(programs, program_masks)
-        # else:
-        #     _, h_enc = self.program_encoder(programs, program_lens)
+        behavior_embedding = self.encoder(s_h, a_h, s_h_len, a_h_len)
         encoder_time = time.time() - t
-
-        # if self._latent_mean_pooling:
-        #     output_enc_pad, output_enc_size = pad_packed_sequence(output_enc, batch_first=False)
-        #     output_enc_mean = output_enc_pad.mean(dim=0, keepdim=True)
-        #     assert output_enc_mean.shape == h_enc.data.shape, "output_enc_mean shape {}, h_enc.data shape: {}".format(output_enc_mean.shape, h_enc.data.shape)
-        #     h_enc = output_enc_mean
-
-        # if self._rnn_type == 'GRU':
-        #     if self._vanilla_ae:
-        #         z = h_enc.squeezee()
-        #     else:
-        #         z_mu, z = self._sample_latent(h_enc.squeeze())
-        # elif self._rnn_type == 'LSTM':
-        #     if self._vanilla_ae:
-        #         z = h_enc[0].squeeze()
-        #     else:
-        #         z_mu, z = self._sample_latent(h_enc[0].squeeze())
-        # else:
-        #     raise NotImplementedError()
         
-        # pre_tanh_z = z
-        b_z_mu, b_z = self._sample_latent_bz(self.encoder(s_h, a_h, s_h_len, a_h_len)) #pretanh behavior embedding
-        pre_tanh_b_z = b_z
+        if self._use_vqvae:
+            # b_z_q_st: decoder
+            # b_z_q: codebook
+            b_z_q_st, b_z_q, indices = self.vq_embedding.straight_through(behavior_embedding)
+            t = time.time()
+            b_z_outputs = self.decoder(programs, b_z_q_st, teacher_enforcing=teacher_enforcing, deterministic=deterministic)
+            decoder_time = time.time() - t   
+            # b_z_outputs is programs
+            return b_z_outputs, encoder_time, decoder_time, b_z_q_st, b_z_q, indices
 
-        if self._tanh_after_sample:
-            # z_mu = self.tanh(z_mu)
-            # z = self.tanh(z)
-            b_z_mu = self.tanh(b_z_mu)
-            b_z = self.tanh(b_z)
-        # print(f"z.shape: {z.shape}, b_z.shape: {b_z.shape}")
-        
-        
-        t = time.time()
-        
-        # programs here is the ground truth
-        # z_outputs = self.decoder(programs, z, teacher_enforcing=teacher_enforcing, deterministic=deterministic)
-        b_z_outputs = self.decoder(programs, b_z, teacher_enforcing=teacher_enforcing, deterministic=deterministic)
-         
-        # b_z_outputs = self.decoder(programs, b_z, teacher_enforcing=teacher_enforcing, deterministic=deterministic)
-
-        decoder_time = time.time() - t
-        # b_z_outpus is programs
-        return b_z_outputs, encoder_time, decoder_time, b_z, pre_tanh_b_z, b_z_mu
-
+        else:
+            b_z_mu, b_z = self._sample_latent_bz(behavior_embedding) #pretanh behavior embedding
+            pre_tanh_b_z = b_z
+            if self._tanh_after_sample:
+                b_z_mu = self.tanh(b_z_mu)
+                b_z = self.tanh(b_z)    
+            t = time.time()
+            # programs here is the ground truth
+            b_z_outputs = self.decoder(programs, b_z, teacher_enforcing=teacher_enforcing, deterministic=deterministic)
+            decoder_time = time.time() - t   
+            # b_z_outputs is programs
+            return b_z_outputs, encoder_time, decoder_time, b_z, pre_tanh_b_z, b_z_mu
 
 
 class ConditionPolicy(NNBase):
@@ -969,24 +1007,45 @@ class ProgramVAE(nn.Module):
             encode_sh = s_h
         init_states = s_h[:, :, 0, :, :, :].unsqueeze(2)
         # print(f"init_states.shape: {init_states.shape}")
+        
         if self.vae.decoder.setup == 'supervised':
-            b_z_output, encoder_time, decoder_time, b_z, pre_tanh_b_z, b_z_mu = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = encode_sh, a_h_len = a_h_len, s_h_len = s_h_len)
-            _, b_z_pred_programs, b_z_pred_programs_len, _, b_z_output_logits, b_z_eop_pred_programs, b_z_eop_output_logits, b_z_pred_program_masks, _ = b_z_output
-            _, _, _, b_z_action_logits, b_z_action_masks, _ = self.condition_policy(init_states, a_h, b_z, self.teacher_enforcing,
-                                                                         deterministic=deterministic)
-            b_z_output = {
-                'pred_programs': b_z_pred_programs,
-                'pred_programs_len': b_z_pred_programs_len,
-                'output_logits': b_z_output_logits,
-                'eop_pred_programs': b_z_eop_pred_programs,
-                'eop_output_logits': b_z_eop_output_logits,
-                'pred_program_masks': b_z_pred_program_masks,
-                'action_logits': b_z_action_logits,
-                'action_masks': b_z_action_masks,
-                'pre_tanh': pre_tanh_b_z,
-                'z': b_z,
-                'z_mu': b_z_mu,
-            }
+            if self.vae._use_vqvae:
+                b_z_outputs, encoder_time, decoder_time, b_z_q_st, b_z_q, indices = self.vae(programs, program_masks, self.teacher_enforcing, a_h, encode_sh, a_h_len, s_h_len, deterministic=deterministic)
+                _, b_z_pred_programs, b_z_pred_programs_len, _, b_z_output_logits, b_z_eop_pred_programs, b_z_eop_output_logits, b_z_pred_program_masks, _ = b_z_outputs
+                _, _, _, b_z_action_logits, b_z_action_masks, _ = self.condition_policy(init_states, a_h, b_z_q_st, self.teacher_enforcing,
+                                                                            deterministic=deterministic)   
+                b_z_output = {
+                    'pred_programs': b_z_pred_programs,
+                    'pred_programs_len': b_z_pred_programs_len,
+                    'output_logits': b_z_output_logits,
+                    'eop_pred_programs': b_z_eop_pred_programs,
+                    'eop_output_logits': b_z_eop_output_logits,
+                    'pred_program_masks': b_z_pred_program_masks,
+                    'action_logits': b_z_action_logits,
+                    'action_masks': b_z_action_masks,
+                    'b_z_q_st': b_z_q_st,
+                    'b_z_q': b_z_q,
+                    'indices': indices,
+                }           
+            
+            else: 
+                b_z_output, encoder_time, decoder_time, b_z, pre_tanh_b_z, b_z_mu = self.vae(programs, program_masks, self.teacher_enforcing, deterministic=deterministic, a_h = a_h, s_h = encode_sh, a_h_len = a_h_len, s_h_len = s_h_len)
+                _, b_z_pred_programs, b_z_pred_programs_len, _, b_z_output_logits, b_z_eop_pred_programs, b_z_eop_output_logits, b_z_pred_program_masks, _ = b_z_output
+                _, _, _, b_z_action_logits, b_z_action_masks, _ = self.condition_policy(init_states, a_h, b_z, self.teacher_enforcing,
+                                                                            deterministic=deterministic)
+                b_z_output = {
+                    'pred_programs': b_z_pred_programs,
+                    'pred_programs_len': b_z_pred_programs_len,
+                    'output_logits': b_z_output_logits,
+                    'eop_pred_programs': b_z_eop_pred_programs,
+                    'eop_output_logits': b_z_eop_output_logits,
+                    'pred_program_masks': b_z_pred_program_masks,
+                    'action_logits': b_z_action_logits,
+                    'action_masks': b_z_action_masks,
+                    'pre_tanh': pre_tanh_b_z,
+                    'z': b_z,
+                    'z_mu': b_z_mu,
+                }
 
             return b_z_output, encoder_time, decoder_time
 

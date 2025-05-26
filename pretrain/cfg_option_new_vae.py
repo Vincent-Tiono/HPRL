@@ -322,6 +322,12 @@ config = {
             },
 
     }, 
+    'VQVAE': {
+        'use_vqvae': True,                           
+        'codebook_size': 512,                    
+        'embedding_dim': 64,                     
+        'commitment_cost': 0.25,
+    },
     # FIXME: This is only for backwards compatibility to old parser, should be removed soon
     'policy': 'TokenOutputPolicy',                  # output one token at a time (Ignore for intention space)
     'env_name': 'karel',
