@@ -17,3 +17,4 @@ pretrain/output_dir_new_vae_L40_1m_30epoch_20230104_cpu
 pretrain/output_dir_new_vae_L40_1m_30epoch_20230104
 pretrain/action_encoder_norope_alldata
 run_cpu.sh
+checkpoint/
