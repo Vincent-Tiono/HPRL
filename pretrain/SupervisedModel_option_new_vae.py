@@ -222,7 +222,11 @@ class SupervisedModel(BaseModel):
         :return (dict): batch_info containing accuracy, loss and predicitons
         """
         # Use the class attribute instead of the global variable
-        
+        batch_info = {
+            'code_perplexity': [],
+            'codes_used': []
+        }
+    
         # Do mode-based setup
         if mode == 'train':
             self.net.train()
@@ -344,7 +348,7 @@ class SupervisedModel(BaseModel):
             
             vq_loss = F.mse_loss(b_z_q, b_z_q_st.detach())
             commit_loss = F.mse_loss(b_z_q_st, b_z_q.detach())
-            loss += vq_loss + 0.25 * commit_loss
+            loss += vq_loss + commit_loss
             
             if mode == 'train':
                 loss.backward()
@@ -361,6 +365,19 @@ class SupervisedModel(BaseModel):
                 b_z_greedy_accuracies, b_z_generated_programs, b_z_glogits = self._greedy_rollout(batch, b_z_q_st, targets, trg_mask, mode)
                 # z_greedy_t_accuracy, z_greedy_p_accuracy, z_greedy_a_accuracy, z_greedy_d_accuracy = z_greedy_accuracies
                 b_z_greedy_t_accuracy, b_z_greedy_p_accuracy, b_z_greedy_a_accuracy, b_z_greedy_d_accuracy = b_z_greedy_accuracies
+                # Calculate codebook usage
+                code_perplexity = torch.exp(-torch.sum(
+                    torch.nn.functional.one_hot(indices, self.net.vae.codebook_size).float().mean(0) * 
+                    torch.log(torch.nn.functional.one_hot(indices, self.net.vae.codebook_size).float().mean(0) + 1e-10)
+                ))
+                
+                # How many codes are used at least once in this batch
+                codes_used = torch.sum((torch.nn.functional.one_hot(indices, self.net.vae.codebook_size)
+                                        .sum(0) > 0).float())
+                                        
+                # Add to batch_info_list for logging
+                batch_info['code_perplexity'].append(code_perplexity.item())
+                batch_info['codes_used'].append(codes_used.item())
 
         else:
             b_z_pred_programs       = b_z_output['pred_programs']
@@ -552,7 +569,7 @@ class SupervisedModel(BaseModel):
             # self.eval_metrics['z_vs_b/z_bz_angle'].append(zbz_analysis['angle_deg'])
 
 
-        batch_info = {
+        batch_info.update({
             # 'z_decoder_token_accuracy': z_t_accuracy.detach().cpu().numpy().item(),
             # 'z_decoder_program_accuracy': z_p_accuracy.detach().cpu().numpy().item(),
             'z_condition_action_accuracy': z_cond_t_accuracy.detach().cpu().numpy().item(),
@@ -604,6 +621,6 @@ class SupervisedModel(BaseModel):
             # 'zbz_z_norm': zbz_analysis['z_norm'].detach().cpu().numpy().item(),
             # 'zbz_scale_ratio': zbz_analysis['scale_ratio'].detach().cpu().numpy().item(),
             # 'zbz_angle_deg': zbz_analysis['angle_deg'],
-            }
+            })
 
         return batch_info
