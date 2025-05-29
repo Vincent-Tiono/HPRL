@@ -19,3 +19,4 @@ pretrain/action_encoder_norope_alldata
 run_cpu.sh
 run_checkpoint.sh
 checkpoint/
+pretrain/new/

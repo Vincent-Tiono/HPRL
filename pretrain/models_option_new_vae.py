@@ -617,6 +617,23 @@ class ProgramEncoder(NNBase):
         # Add Linear Layer to compress latent
         if self._use_linear:
             self.fc = nn.Linear(unit_size, hidden_size)
+        
+        self.collect_embeddings = True
+        self.embeddings_buffer = []
+    
+    def start_collecting(self):
+        self.collect_embeddings = True
+        self.embeddings_buffer = []
+        
+    def stop_collecting(self):
+        self.collect_embeddings = False
+        return torch.stack(self.embeddings_buffer) if self.embeddings_buffer else None
+        
+    def save_embeddings(self, filename="program_embeddings.pt"):            
+        embeddings = torch.stack(self.embeddings_buffer)
+        torch.save(embeddings, filename)
+        print(f"Saved {len(self.embeddings_buffer)} embeddings to {filename}")
+        
 
     def forward(self, src, src_len):
         program_embeddings = self.token_encoder(src)
@@ -630,7 +647,13 @@ class ProgramEncoder(NNBase):
         # Add Linear Layer to compress latent
         if self._use_linear:
             rnn_hxs = self.fc(rnn_hxs)
-
+        
+        # Collect embeddings if enabled
+        if self.collect_embeddings:
+            with torch.no_grad():
+                for embedding in rnn_hxs.detach():
+                        self.embeddings_buffer.append(embedding)
+        
         return x, rnn_hxs
 
 class Decoder(NNBase):
@@ -1654,8 +1677,10 @@ class VAE(torch.nn.Module):
         if self._use_transformer_encoder:
             program_masks = program_masks.squeeze().unsqueeze(-2)
             _, h_enc = self.program_encoder(programs, program_masks)
+            self.program_encoder.save_embeddings(filename="program_embeddings.pt")
         else:
             _, h_enc = self.program_encoder(programs, program_lens)
+            self.program_encoder.save_embeddings(filename="program_embeddings.pt")
         encoder_time = time.time() - t
 
         if self._latent_mean_pooling:

@@ -58,6 +58,12 @@ class BaseModel(object):
 
         # set number of program tokens
         self.num_program_tokens = self.net.num_program_tokens
+        
+        # Initialize optimizer
+        self.setup_optimizer(self.net.parameters())
+
+        # Initialize learning rate scheduler
+        self.setup_lr_scheduler()
 
         # Load parameters if available
         ckpt_path = config['net']['saved_params_path']
@@ -75,12 +81,6 @@ class BaseModel(object):
 
         logger.info('VAE Network:\n{}'.format(self.net.vae))
         logger.info('VAE Network total parameters: {}'.format(count_parameters(self.net.vae)))
-
-        # Initialize optimizer
-        self.setup_optimizer(self.net.parameters())
-
-        # Initialize learning rate scheduler
-        self.setup_lr_scheduler()
 
         # Loss function
         self.loss_fn = nn.CrossEntropyLoss(reduction='mean')
